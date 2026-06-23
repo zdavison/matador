@@ -1013,6 +1013,15 @@ Setting `exact: true` marks a queue as owned by another service. When set:
 - To target or consume it, reference it by its full exact name in
   `targetQueue` / `consumeFrom` — it resolves as-is, without the
   namespace prefix.
+- It must still be declared with `.addQueue({ name, exact: true })`. A
+  `targetQueue` / `consumeFrom` reference that is **not** declared in the
+  topology throws `UnknownQueueReferenceError` at dispatch/subscribe time,
+  rather than being silently namespace-qualified and routed to a queue
+  nobody consumes.
+
+> **Every queue reference must be declared.** This applies to Matador-owned
+> queues too: a subscriber's `targetQueue` or a `consumeFrom` entry that was
+> never added via `.addQueue(...)` throws `UnknownQueueReferenceError`.
 
 # CLI
 

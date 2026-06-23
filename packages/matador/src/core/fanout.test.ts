@@ -47,6 +47,9 @@ class UserCreatedEventWithMetadata extends MatadorEvent {
 const testTopology = TopologyBuilder.create()
   .withNamespace('test')
   .addQueue('events')
+  .addQueue('notifications')
+  .addQueue('queue-1')
+  .addQueue('queue-2')
   .build();
 
 describe('FanoutEngine', () => {

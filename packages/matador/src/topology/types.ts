@@ -1,3 +1,5 @@
+import { UnknownQueueReferenceError } from '../errors/matador-errors.js';
+
 /**
  * Transport-agnostic topology definition.
  * Matador owns the topology; transports translate and apply it.
@@ -269,15 +271,23 @@ export function findQueueDefinition(
  * Resolves a local queue reference (a subscriber's `targetQueue` or a
  * `consumeFrom` entry) to the transport-level queue name.
  *
- * A reference matching an exact queue's name resolves to that name as-is;
- * everything else is namespace-qualified (honoring any naming overrides).
+ * The reference must be declared in the topology via `.addQueue(...)`:
+ * an exact queue resolves to its name as-is; a Matador-owned queue is
+ * namespace-qualified (honoring any naming overrides). An undeclared
+ * reference throws {@link UnknownQueueReferenceError} rather than being
+ * silently qualified and routed to a queue nobody consumes.
+ *
+ * @throws UnknownQueueReferenceError if `queueName` is not in `topology.queues`.
  */
 export function resolveTargetQueueName(
   topology: Topology,
   queueName: string,
 ): string {
   const def = findQueueDefinition(topology, queueName);
-  if (def?.exact) {
+  if (def === undefined) {
+    throw new UnknownQueueReferenceError(queueName);
+  }
+  if (def.exact) {
     return def.name;
   }
   return getQualifiedQueueName(topology.namespace, queueName, topology.naming);

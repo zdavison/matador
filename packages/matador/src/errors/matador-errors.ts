@@ -339,6 +339,28 @@ export class LocalTransportCannotProcessStubError extends MatadorError {
 // ============================================================================
 
 /**
+ * Thrown when a subscriber's `targetQueue` or a `consumeFrom` entry references
+ * a queue that was never declared in the topology.
+ */
+export class UnknownQueueReferenceError extends MatadorError {
+  readonly description =
+    'A queue was referenced that is not declared in the topology. ' +
+    'Matador only routes to queues it knows about; an unknown reference would ' +
+    'otherwise be silently namespace-qualified and published to a queue nobody ' +
+    'consumes, losing the message. ' +
+    'ACTION: Declare the queue on the topology before referencing it. ' +
+    'For a Matador-owned queue use `.addQueue(name)`; for a foreign queue owned ' +
+    'by another service use `.addQueue({ name, exact: true })` so it is routed ' +
+    'to verbatim.';
+
+  constructor(public readonly queueName: string) {
+    super(
+      `Queue reference "${queueName}" is not declared in the topology. Add it via .addQueue(name), or .addQueue({ name, exact: true }) for a foreign queue.`,
+    );
+  }
+}
+
+/**
  * Thrown when a queue is not found or not created.
  */
 export class QueueNotFoundError extends MatadorError {
@@ -479,6 +501,12 @@ export function isSubscriberNotRegisteredError(
   error: unknown,
 ): error is SubscriberNotRegisteredError {
   return error instanceof SubscriberNotRegisteredError;
+}
+
+export function isUnknownQueueReferenceError(
+  error: unknown,
+): error is UnknownQueueReferenceError {
+  return error instanceof UnknownQueueReferenceError;
 }
 
 export function isMessageMaybePoisonedError(

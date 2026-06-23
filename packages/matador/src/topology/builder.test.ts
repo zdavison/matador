@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test';
+import { UnknownQueueReferenceError } from '../errors/matador-errors.js';
 import { TopologyBuilder, TopologyValidationError } from './builder.js';
 import {
   type TopologyNaming,
@@ -574,6 +575,15 @@ describe('TopologyNaming', () => {
         findQueueDefinition(topology, 'matador.shared.id-platform')?.name,
       ).toBe('matador.shared.id-platform');
       expect(findQueueDefinition(topology, 'missing')).toBeUndefined();
+    });
+
+    it('should throw for a queue reference not declared in the topology', () => {
+      // A targetQueue/consumeFrom name that was never added to the topology
+      // must fail loudly rather than be silently namespace-qualified and
+      // routed to a queue nobody consumes.
+      expect(() =>
+        resolveTargetQueueName(topology, 'ext-service.payments'),
+      ).toThrow(UnknownQueueReferenceError);
     });
   });
 });

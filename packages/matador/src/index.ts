@@ -209,6 +209,8 @@ export {
   LocalTransportCannotProcessStubError,
   // Queue errors
   QueueNotFoundError,
+  UnknownQueueReferenceError,
+  isUnknownQueueReferenceError,
   // Event validation errors
   InvalidEventError,
   // Message processing errors
