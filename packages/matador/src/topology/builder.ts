@@ -64,12 +64,32 @@ export class TopologyBuilder {
     maxDelayMs: 300000, // 5 minutes
   };
   private naming: TopologyNaming | undefined;
+  private prefix: string | null = 'matador';
 
   /**
    * Sets the namespace prefix for all queues.
    */
   withNamespace(namespace: string): this {
     this.namespace = namespace;
+    return this;
+  }
+
+  /**
+   * Sets the prefix prepended to every default-derived broker resource name
+   * (e.g. `matador.{namespace}.{queue}`), so Matador-managed queues and
+   * exchanges are identifiable. Pass `null` to disable prefixing.
+   *
+   * Only applies to default names — a {@link withNaming} override fully owns
+   * its output and is never prefixed.
+   *
+   * @default 'matador'
+   * @example
+   * TopologyBuilder.create().withNamespace('myapp')            // matador.myapp.events
+   * TopologyBuilder.create().withNamespace('myapp').withPrefix('acme')  // acme.myapp.events
+   * TopologyBuilder.create().withNamespace('myapp').withPrefix(null)    // myapp.events
+   */
+  withPrefix(prefix: string | null): this {
+    this.prefix = prefix;
     return this;
   }
 
@@ -177,6 +197,7 @@ export class TopologyBuilder {
   validate(): readonly string[] {
     return [
       ...validateNamespace(this.namespace),
+      ...validatePrefix(this.prefix),
       ...validateQueues(this.queues),
       ...validateRetry(this.retry),
       ...validateNaming(this.naming),
@@ -202,6 +223,7 @@ export class TopologyBuilder {
       deadLetter: this.deadLetter,
       retry: this.retry,
       naming: this.naming,
+      prefix: this.prefix,
     };
   }
 }
@@ -215,6 +237,22 @@ function validateNamespace(namespace: string): string[] {
   if (!IDENTIFIER_PATTERN.test(namespace)) {
     return [
       'Namespace must start with a letter and contain only alphanumeric characters, underscores, and hyphens',
+    ];
+  }
+  return [];
+}
+
+function validatePrefix(prefix: string | null): string[] {
+  // null explicitly disables prefixing.
+  if (prefix === null) {
+    return [];
+  }
+  if (prefix.trim() === '') {
+    return ['Prefix must be a non-empty string, or null to disable prefixing'];
+  }
+  if (!IDENTIFIER_PATTERN.test(prefix)) {
+    return [
+      'Prefix must start with a letter and contain only alphanumeric characters, underscores, and hyphens',
     ];
   }
   return [];

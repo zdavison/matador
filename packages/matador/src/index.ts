@@ -105,6 +105,7 @@ export type {
   TransportQueueOptions,
 } from './topology/index.js';
 export {
+  applyPrefix,
   findQueueDefinition,
   getDeadLetterQueueName,
   getQualifiedQueueName,

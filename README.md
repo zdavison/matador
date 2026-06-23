@@ -980,6 +980,30 @@ await matador.send(ScheduledNotificationEvent, notificationData, {
 });
 ```
 
+#### Resource name prefix
+
+By default, Matador prefixes every broker resource it creates with `matador`, so its queues and exchanges are identifiable on a shared broker:
+
+```typescript
+TopologyBuilder.create()
+  .withNamespace('myapp')
+  .addQueue('events')
+  .build()
+// → matador.myapp.events, matador.myapp.exchange, matador.myapp.dlx,
+//   matador.myapp.events.retry, matador.myapp.events.unhandled, …
+```
+
+Change the prefix, or disable it entirely, with `withPrefix()`:
+
+```typescript
+.withPrefix('acme')  // acme.myapp.events
+.withPrefix(null)    // myapp.events  (no prefix)
+```
+
+The prefix applies only to default-derived names. A `withNaming()` override (below) fully owns its output and is never prefixed. `exact: true` queues are never prefixed.
+
+> **BREAKING:** default resource names are now `matador`-prefixed. A v3 deployment created before this change used unprefixed names (`{namespace}.{queue}`); add `.withPrefix(null)` to keep them and avoid declaring a new set of queues.
+
 #### Migrations from v1
 
 To adopt v3 from v1 without renaming, override how names are derived with `withNaming()`. Each builder receives the namespace from `withNamespace()` as an argument and returns the final name — so the namespace is always an explicit input to the strategy, never applied separately on top of the result:
@@ -998,7 +1022,7 @@ TopologyBuilder.create()
   .build()
 ```
 
-Retry queues and dead-letter queues are derived from the work-queue name your `queue` builder returns. All builders are optional; omit any to keep the default (`${namespace}.…`).
+Retry queues and dead-letter queues are derived from the work-queue name your `queue` builder returns. All builders are optional; omit any to keep the default (`matador.${namespace}.…`, or `${namespace}.…` when the prefix is disabled via `withPrefix(null)`).
 
 #### Exact queues
 

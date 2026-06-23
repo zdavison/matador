@@ -154,7 +154,7 @@ describe('FanoutEngine', () => {
       await fanout.send(UserCreatedEvent, event);
 
       expect(transport.send).toHaveBeenCalledWith(
-        'test.events',
+        'matador.test.events',
         expect.any(Object),
         undefined,
       );
@@ -178,7 +178,7 @@ describe('FanoutEngine', () => {
       await fanout.send(UserCreatedEvent, event);
 
       expect(transport.send).toHaveBeenCalledWith(
-        'test.notifications',
+        'matador.test.notifications',
         expect.any(Object),
         undefined,
       );
@@ -334,8 +334,8 @@ describe('FanoutEngine', () => {
       await fanout.send(UserCreatedEvent, event);
 
       const calls = (transport.send as ReturnType<typeof mock>).mock.calls;
-      expect(calls[0]?.[0]).toBe('test.queue-1');
-      expect(calls[1]?.[0]).toBe('test.queue-2');
+      expect(calls[0]?.[0]).toBe('matador.test.queue-1');
+      expect(calls[1]?.[0]).toBe('matador.test.queue-2');
     });
 
     it('should send to no subscribers when event is not registered', async () => {
@@ -695,7 +695,7 @@ describe('FanoutEngine', () => {
       expect(result.subscribersSkipped).toBe(0);
       expect(result.errors).toHaveLength(1);
       expect(result.errors[0]?.subscriberName).toBe('handle-user');
-      expect(result.errors[0]?.queue).toBe('test.events');
+      expect(result.errors[0]?.queue).toBe('matador.test.events');
       expect(result.errors[0]?.error).toBeInstanceOf(TransportSendError);
     });
 
@@ -703,7 +703,7 @@ describe('FanoutEngine', () => {
       const failingTransport: Transport = {
         ...transport,
         send: mock(async (queue: string) => {
-          if (queue === 'test.queue-1') {
+          if (queue === 'matador.test.queue-1') {
             throw new Error('Queue 1 failed');
           }
           return 'mock';
@@ -785,7 +785,7 @@ describe('FanoutEngine', () => {
 
       expect(result.errors).toHaveLength(1);
       expect(result.errors[0]?.error).toBeInstanceOf(TransportSendError);
-      expect(result.errors[0]?.error.message).toContain('test.events');
+      expect(result.errors[0]?.error.message).toContain('matador.test.events');
     });
   });
 
@@ -1049,7 +1049,7 @@ describe('FanoutEngine', () => {
       expect(onEnqueueSuccess).toHaveBeenCalledTimes(1);
       expect(onEnqueueSuccess).toHaveBeenCalledWith({
         envelope: expect.any(Object),
-        queue: 'test.events',
+        queue: 'matador.test.events',
         transport: 'mock',
       });
 
@@ -1254,7 +1254,7 @@ describe('FanoutEngine', () => {
       await fanout.send(UserCreatedEvent, event, options);
 
       expect(transport.send).toHaveBeenCalledWith(
-        'test.events',
+        'matador.test.events',
         expect.any(Object),
         { delay: 5000 },
       );
@@ -1308,7 +1308,7 @@ describe('FanoutEngine', () => {
       await fanout.send(UserCreatedEvent, event);
 
       expect(transport.send).toHaveBeenCalledWith(
-        'test.events',
+        'matador.test.events',
         expect.any(Object),
         undefined,
       );

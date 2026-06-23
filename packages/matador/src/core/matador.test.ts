@@ -416,7 +416,7 @@ describe('Matador', () => {
       expect(thrown.eventKey).toBe(UserCreatedEvent.key);
       expect(thrown.errors).toHaveLength(1);
       expect(thrown.errors[0]?.subscriberName).toBe('handle-user');
-      expect(thrown.errors[0]?.queue).toBe('test.events');
+      expect(thrown.errors[0]?.queue).toBe('matador.test.events');
       expect(thrown.errors[0]?.error).toBeInstanceOf(TransportSendError);
       expect(thrown.errors[0]?.error.cause).toBe(sendError);
     });

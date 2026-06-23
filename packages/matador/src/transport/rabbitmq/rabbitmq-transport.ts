@@ -15,6 +15,7 @@ import {
 import { type Logger, consoleLogger } from '../../hooks/index.js';
 import type { QueueDefinition, Topology } from '../../topology/types.js';
 import {
+  applyPrefix,
   getDeadLetterQueueName,
   getRetryQueueName,
   resolveQueueName,
@@ -720,6 +721,7 @@ export class RabbitMQTransport implements Transport {
       topology.namespace,
       queueDef,
       topology.naming,
+      topology.prefix,
     );
 
     const rabbitmqOptions = queueDef.transport?.rabbitmq?.options;
@@ -757,11 +759,13 @@ export class RabbitMQTransport implements Transport {
       topology.namespace,
       queueDef,
       topology.naming,
+      topology.prefix,
     );
     const retryQueueName = getRetryQueueName(
       topology.namespace,
       queueDef.name,
       topology.naming,
+      topology.prefix,
     );
     const mainExchange = this.getMainExchangeName(topology);
 
@@ -798,6 +802,7 @@ export class RabbitMQTransport implements Transport {
         queueDef.name,
         dlqType,
         topology.naming,
+        topology.prefix,
       );
 
       const dlqOptions: Options.AssertQueue = {
@@ -824,21 +829,21 @@ export class RabbitMQTransport implements Transport {
   private getMainExchangeName(topology: Topology): string {
     return (
       topology.naming?.mainExchange?.(topology.namespace) ??
-      `${topology.namespace}.exchange`
+      applyPrefix(topology.prefix, `${topology.namespace}.exchange`)
     );
   }
 
   private getDLXExchangeName(topology: Topology): string {
     return (
       topology.naming?.dlxExchange?.(topology.namespace) ??
-      `${topology.namespace}.dlx`
+      applyPrefix(topology.prefix, `${topology.namespace}.dlx`)
     );
   }
 
   private getDelayedExchangeName(topology: Topology): string {
     return (
       topology.naming?.delayedExchange?.(topology.namespace) ??
-      `${topology.namespace}.delayed`
+      applyPrefix(topology.prefix, `${topology.namespace}.delayed`)
     );
   }
 

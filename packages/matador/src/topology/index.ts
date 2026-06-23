@@ -10,6 +10,7 @@ export type {
   TransportQueueOptions,
 } from './types.js';
 export {
+  applyPrefix,
   findQueueDefinition,
   getDeadLetterQueueName,
   getQualifiedQueueName,

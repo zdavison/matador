@@ -103,6 +103,7 @@ export class LocalTransport implements Transport {
         topology.namespace,
         queueDef,
         topology.naming,
+        topology.prefix,
       );
       if (!this.queues.has(queueName)) {
         this.queues.set(queueName, []);
