@@ -21,7 +21,7 @@ while letting it be changed to another string or disabled entirely.
   `{ns}.{queue}` to `matador.{ns}.{queue}`. This changes the broker topology for any
   v3 deployment not using `withNaming`, but the only existing v3 deployment already
   uses a `matador` prefix, so a guard is unnecessary. Documented as a breaking change.
-- **API: `.withPrefix(value: string | null)`** on `TopologyBuilder`. Default
+- **API: `.withGlobalPrefix(value: string | null)`** on `TopologyBuilder`. Default
   `'matador'`. A string sets the prefix; `null` disables prefixing.
 - **Prefix applies to default name builders only.** If a `withNaming` builder is
   supplied for a resource, that builder fully owns its output and the prefix is **not**
@@ -43,11 +43,11 @@ initialises it to `'matador'`.
 ```ts
 TopologyBuilder.create()
   .withNamespace('myapp')   // matador.myapp.events  (default)
-  .withPrefix('acme')       // acme.myapp.events
-  .withPrefix(null)         // myapp.events          (no prefix)
+  .withGlobalPrefix('acme')       // acme.myapp.events
+  .withGlobalPrefix(null)         // myapp.events          (no prefix)
 ```
 
-`withPrefix(value: string | null): this` stores the value. Never calling it leaves
+`withGlobalPrefix(value: string | null): this` stores the value. Never calling it leaves
 the default `'matador'`.
 
 ### Prefix application
@@ -105,19 +105,19 @@ The prefix is applied **only inside `<default>`** via `applyPrefix`. So an expli
 ### Documentation
 
 - README topology/`withNaming` section: document the default `matador` prefix,
-  `.withPrefix()`, and `.withPrefix(null)`.
-- JSDoc on `withPrefix` and the `Topology.prefix` field, including `@default 'matador'`.
+  `.withGlobalPrefix()`, and `.withGlobalPrefix(null)`.
+- JSDoc on `withGlobalPrefix` and the `Topology.prefix` field, including `@default 'matador'`.
 - A short "BREAKING: default resource names are now `matador`-prefixed; use
-  `.withPrefix(null)` to keep the previous unprefixed names" note in the changelog /
+  `.withGlobalPrefix(null)` to keep the previous unprefixed names" note in the changelog /
   README migration section.
 
 ## Testing (TDD)
 
 RED-first unit tests (topology builder + naming helpers):
 
-1. Default topology (no `.withPrefix`) qualifies a queue as `matador.{ns}.{queue}`.
-2. `.withPrefix('acme')` qualifies as `acme.{ns}.{queue}`.
-3. `.withPrefix(null)` qualifies as `{ns}.{queue}` (no prefix).
+1. Default topology (no `.withGlobalPrefix`) qualifies a queue as `matador.{ns}.{queue}`.
+2. `.withGlobalPrefix('acme')` qualifies as `acme.{ns}.{queue}`.
+3. `.withGlobalPrefix(null)` qualifies as `{ns}.{queue}` (no prefix).
 4. Prefix reaches the default main / dlx / delayed exchange names.
 5. DLQ and retry names inherit the prefix (`matador.{ns}.{queue}.unhandled`, `.retry`).
 6. A `withNaming.queue` (and exchange) override is **not** prefixed even when a
@@ -136,7 +136,7 @@ overrides every builder via `withNaming`, so the prefix never applies).
 ## Acceptance criteria
 
 1. Default builds produce `matador`-prefixed names for all default resources.
-2. `.withPrefix(str)` and `.withPrefix(null)` change/disable the prefix.
+2. `.withGlobalPrefix(str)` and `.withGlobalPrefix(null)` change/disable the prefix.
 3. `withNaming` overrides are never prefixed.
 4. Invalid prefixes fail validation with a clear message.
 5. Docs state the new default and the breaking change.

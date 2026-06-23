@@ -608,11 +608,11 @@ describe('resource name prefix', () => {
     });
   });
 
-  describe('withPrefix', () => {
+  describe('withGlobalPrefix', () => {
     it('uses a custom prefix string', () => {
       const topology = TopologyBuilder.create()
         .withNamespace('myapp')
-        .withPrefix('acme')
+        .withGlobalPrefix('acme')
         .addQueue('events')
         .build();
 
@@ -625,7 +625,7 @@ describe('resource name prefix', () => {
     it('disables prefixing when set to null', () => {
       const topology = TopologyBuilder.create()
         .withNamespace('myapp')
-        .withPrefix(null)
+        .withGlobalPrefix(null)
         .addQueue('events')
         .build();
 
@@ -655,7 +655,7 @@ describe('resource name prefix', () => {
     it('does not prefix names produced by a withNaming override', () => {
       const topology = TopologyBuilder.create()
         .withNamespace('myapp')
-        .withPrefix('matador')
+        .withGlobalPrefix('matador')
         .withNaming({ queue: (_ns, q) => `legacy-${q}` })
         .addQueue('events')
         .build();
@@ -670,7 +670,7 @@ describe('resource name prefix', () => {
       expect(() =>
         TopologyBuilder.create()
           .withNamespace('myapp')
-          .withPrefix('')
+          .withGlobalPrefix('')
           .addQueue('events')
           .build(),
       ).toThrow(TopologyValidationError);
@@ -680,14 +680,14 @@ describe('resource name prefix', () => {
       expect(() =>
         TopologyBuilder.create()
           .withNamespace('myapp')
-          .withPrefix('1bad')
+          .withGlobalPrefix('1bad')
           .addQueue('events')
           .build(),
       ).toThrow(TopologyValidationError);
       expect(() =>
         TopologyBuilder.create()
           .withNamespace('myapp')
-          .withPrefix('has space')
+          .withGlobalPrefix('has space')
           .addQueue('events')
           .build(),
       ).toThrow(TopologyValidationError);
@@ -697,14 +697,14 @@ describe('resource name prefix', () => {
       expect(() =>
         TopologyBuilder.create()
           .withNamespace('myapp')
-          .withPrefix(null)
+          .withGlobalPrefix(null)
           .addQueue('events')
           .build(),
       ).not.toThrow();
       expect(() =>
         TopologyBuilder.create()
           .withNamespace('myapp')
-          .withPrefix('acme_co-1')
+          .withGlobalPrefix('acme_co-1')
           .addQueue('events')
           .build(),
       ).not.toThrow();

@@ -993,16 +993,16 @@ TopologyBuilder.create()
 //   matador.myapp.events.retry, matador.myapp.events.unhandled, …
 ```
 
-Change the prefix, or disable it entirely, with `withPrefix()`:
+Change the prefix, or disable it entirely, with `withGlobalPrefix()`:
 
 ```typescript
-.withPrefix('acme')  // acme.myapp.events
-.withPrefix(null)    // myapp.events  (no prefix)
+.withGlobalPrefix('acme')  // acme.myapp.events
+.withGlobalPrefix(null)    // myapp.events  (no prefix)
 ```
 
 The prefix applies only to default-derived names. A `withNaming()` override (below) fully owns its output and is never prefixed. `exact: true` queues are never prefixed.
 
-> **BREAKING:** default resource names are now `matador`-prefixed. A v3 deployment created before this change used unprefixed names (`{namespace}.{queue}`); add `.withPrefix(null)` to keep them and avoid declaring a new set of queues.
+> **BREAKING:** default resource names are now `matador`-prefixed. A v3 deployment created before this change used unprefixed names (`{namespace}.{queue}`); add `.withGlobalPrefix(null)` to keep them and avoid declaring a new set of queues.
 
 #### Migrations from v1
 
@@ -1022,7 +1022,7 @@ TopologyBuilder.create()
   .build()
 ```
 
-Retry queues and dead-letter queues are derived from the work-queue name your `queue` builder returns. All builders are optional; omit any to keep the default (`matador.${namespace}.…`, or `${namespace}.…` when the prefix is disabled via `withPrefix(null)`).
+Retry queues and dead-letter queues are derived from the work-queue name your `queue` builder returns. All builders are optional; omit any to keep the default (`matador.${namespace}.…`, or `${namespace}.…` when the prefix is disabled via `withGlobalPrefix(null)`).
 
 #### Exact queues
 

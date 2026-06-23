@@ -85,10 +85,10 @@ export class TopologyBuilder {
    * @default 'matador'
    * @example
    * TopologyBuilder.create().withNamespace('myapp')            // matador.myapp.events
-   * TopologyBuilder.create().withNamespace('myapp').withPrefix('acme')  // acme.myapp.events
-   * TopologyBuilder.create().withNamespace('myapp').withPrefix(null)    // myapp.events
+   * TopologyBuilder.create().withNamespace('myapp').withGlobalPrefix('acme')  // acme.myapp.events
+   * TopologyBuilder.create().withNamespace('myapp').withGlobalPrefix(null)    // myapp.events
    */
-  withPrefix(prefix: string | null): this {
+  withGlobalPrefix(prefix: string | null): this {
     this.prefix = prefix;
     return this;
   }
