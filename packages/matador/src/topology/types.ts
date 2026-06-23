@@ -36,6 +36,10 @@ export interface Topology {
  *  - dead-letter exchange: `${namespace}.dlx`
  *  - delayed exchange: `${namespace}.delayed`
  *
+ * Retry queues and DLQs have no builder of their own: they are derived from the
+ * work-queue name (`<queue>.retry`, `<queue>.unhandled`, `<queue>.undeliverable`),
+ * so overriding `queue` carries your prefix into them automatically.
+ *
  * Intended for migrations: an adopter can keep pre-existing names (e.g. from
  * Matador v1) so a rolling deploy keeps using the broker resources already in
  * place instead of draining or dual-consuming.

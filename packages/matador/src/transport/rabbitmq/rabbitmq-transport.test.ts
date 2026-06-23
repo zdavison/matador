@@ -1,5 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test';
 import type { Logger } from '../../hooks/index.js';
+import { TopologyBuilder } from '../../topology/index.js';
+import type { QueueDefinition, Topology } from '../../topology/index.js';
 import { RabbitMQTransport, redactAmqpUrl } from './rabbitmq-transport.js';
 
 describe('redactAmqpUrl', () => {
@@ -116,6 +118,136 @@ describe('RabbitMQTransport', () => {
         "[Matador] \u23F3 Connecting to RabbitMQ at 'amqp://localhost:5672'.",
       );
     });
+  });
+});
+
+describe('dead-letter and retry queue naming under withNaming', () => {
+  // A v1-style naming strategy: a migrating deployment keeps Matador v1's
+  // `matador.{ns}.{queue}` names so DLQ/retry resources stay identifiable.
+  const NS = 'myapp';
+  const v1Naming = {
+    queue: (ns: string, q: string) => `matador.${ns}.${q}`,
+    mainExchange: (ns: string) => `matador.${ns}`,
+    dlxExchange: (ns: string) => `matador.${ns}.dlx-undeliverable`,
+    dlxExchangeType: 'topic' as const,
+  };
+
+  function buildTopology(): Topology {
+    return TopologyBuilder.create()
+      .withNamespace(NS)
+      .withNaming(v1Naming)
+      .addQueue('events')
+      .build();
+  }
+
+  interface AssertQueueCall {
+    name: string;
+    options: unknown;
+  }
+  interface BindQueueCall {
+    queue: string;
+    exchange: string;
+    routingKey: string;
+  }
+
+  function createRecordingChannel() {
+    const assertQueueCalls: AssertQueueCall[] = [];
+    const bindQueueCalls: BindQueueCall[] = [];
+    const channel = {
+      assertQueue: (name: string, options: unknown) => {
+        assertQueueCalls.push({ name, options });
+        return Promise.resolve({ queue: name });
+      },
+      bindQueue: (queue: string, exchange: string, routingKey: string) => {
+        bindQueueCalls.push({ queue, exchange, routingKey });
+        return Promise.resolve({});
+      },
+    };
+    return { channel, assertQueueCalls, bindQueueCalls };
+  }
+
+  function createTransport() {
+    return new RabbitMQTransport({
+      url: 'amqp://localhost:5672',
+      connectionName: 'test',
+    });
+  }
+
+  it('derives the retry queue name through the naming strategy', async () => {
+    const transport = createTransport();
+    const topology = buildTopology();
+    const queueDef = topology.queues[0] as QueueDefinition;
+    const { channel, assertQueueCalls, bindQueueCalls } =
+      createRecordingChannel();
+
+    await (
+      transport as unknown as {
+        assertRetryQueue(
+          channel: unknown,
+          topology: Topology,
+          queueDef: QueueDefinition,
+        ): Promise<void>;
+      }
+    ).assertRetryQueue(channel, topology, queueDef);
+
+    expect(assertQueueCalls.map((c) => c.name)).toEqual([
+      'matador.myapp.events.retry',
+    ]);
+    // Retry queue dead-letters back to the (overridden) main exchange using the
+    // resolved work-queue name as the routing key.
+    const retryOptions = assertQueueCalls[0]?.options as {
+      arguments: Record<string, unknown>;
+    };
+    expect(retryOptions.arguments['x-dead-letter-exchange']).toBe(
+      'matador.myapp',
+    );
+    expect(retryOptions.arguments['x-dead-letter-routing-key']).toBe(
+      'matador.myapp.events',
+    );
+    expect(bindQueueCalls).toEqual([
+      {
+        queue: 'matador.myapp.events.retry',
+        exchange: 'matador.myapp',
+        routingKey: 'matador.myapp.events.retry',
+      },
+    ]);
+  });
+
+  it('derives DLQ names through the naming strategy and binds them to the overridden DLX', async () => {
+    const transport = createTransport();
+    const topology = buildTopology();
+    const { channel, assertQueueCalls, bindQueueCalls } =
+      createRecordingChannel();
+
+    const assertDeadLetterQueues = (
+      transport as unknown as {
+        assertDeadLetterQueues(
+          channel: unknown,
+          topology: Topology,
+          dlqType: 'unhandled' | 'undeliverable',
+        ): Promise<void>;
+      }
+    ).assertDeadLetterQueues.bind(transport);
+
+    await assertDeadLetterQueues(channel, topology, 'unhandled');
+    await assertDeadLetterQueues(channel, topology, 'undeliverable');
+
+    expect(assertQueueCalls.map((c) => c.name)).toEqual([
+      'matador.myapp.events.unhandled',
+      'matador.myapp.events.undeliverable',
+    ]);
+    expect(bindQueueCalls).toEqual([
+      {
+        queue: 'matador.myapp.events.unhandled',
+        exchange: 'matador.myapp.dlx-undeliverable',
+        routingKey: 'matador.myapp.events.unhandled',
+      },
+      {
+        queue: 'matador.myapp.events.undeliverable',
+        exchange: 'matador.myapp.dlx-undeliverable',
+        routingKey: 'matador.myapp.events.undeliverable',
+      },
+    ]);
   });
 });
 

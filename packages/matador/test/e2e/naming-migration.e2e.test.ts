@@ -137,6 +137,34 @@ describe.skipIf(SKIP_E2E)('Naming migration E2E (v1-compatible names)', () => {
     expect(msg).not.toBe(false);
   });
 
+  it('declares dead-letter and retry queues under the migration prefix', async () => {
+    const topology = createV1CompatTopology();
+    transport = new RabbitMQTransport({
+      url: connectionUrl,
+      connectionName: 'naming-migration-e2e',
+    });
+    await transport.connect();
+    await transport.applyTopology(topology);
+
+    // DLQ and retry names inherit the migration prefix from the `queue`
+    // builder, so they stay identifiable as Matador-managed resources.
+    // `checkQueue` resolves only if the queue exists (and would throw and kill
+    // the channel otherwise), so each check runs on its own channel.
+    const expectedQueues = [
+      `matador.${NS}.general.retry`,
+      `matador.${NS}.general.unhandled`,
+      `matador.${NS}.general.undeliverable`,
+    ];
+    const connection = await amqplib.connect(connectionUrl);
+    for (const queueName of expectedQueues) {
+      const channel = await connection.createChannel();
+      const info = await channel.checkQueue(queueName);
+      expect(info.queue).toBe(queueName);
+      await channel.close();
+    }
+    await connection.close();
+  });
+
   it('routes an exact queue referenced by its full name as-is', async () => {
     const topology = createV1CompatTopology();
     transport = new RabbitMQTransport({
