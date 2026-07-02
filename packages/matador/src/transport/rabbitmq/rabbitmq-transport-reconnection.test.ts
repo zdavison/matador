@@ -17,9 +17,17 @@ const closeHandlers: Array<() => void> = [];
 // Total number of times channel.consume() has been called across all connections.
 let consumeCallCount = 0;
 
+// close() call count per connection, indexed by creation order.
+const connectionCloseCounts: number[] = [];
+
+// Set to a connection index to make that connection's createConfirmChannel throw.
+let failConfirmChannelOnConnection = -1;
+
 function resetMockState() {
   closeHandlers.length = 0;
   consumeCallCount = 0;
+  connectionCloseCounts.length = 0;
+  failConfirmChannelOnConnection = -1;
 }
 
 function makeMockChannel() {
@@ -50,6 +58,9 @@ function makeMockChannel() {
 }
 
 function mockConnect() {
+  const index = connectionCloseCounts.length;
+  connectionCloseCounts.push(0);
+
   const channel = makeMockChannel();
   const connectionCloseListeners: Array<() => void> = [];
 
@@ -61,8 +72,17 @@ function mockConnect() {
       }
     },
     createChannel: async () => channel,
-    createConfirmChannel: async () => channel,
-    close: async () => {},
+    createConfirmChannel: async () => {
+      if (failConfirmChannelOnConnection === index) {
+        throw new Error('simulated channel creation failure');
+      }
+      return channel;
+    },
+    close: async () => {
+      if (connectionCloseCounts[index] !== undefined) {
+        connectionCloseCounts[index]++;
+      }
+    },
   };
 
   return Promise.resolve(connection);
@@ -114,7 +134,6 @@ describe('RabbitMQTransport – consumer recreation on reconnect', () => {
     // Give the ConnectionManager time to reconnect (initialReconnectDelay = 10 ms).
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    // After reconnect, doConnect() runs again and re-applies topology and recreates consumers.
     expect(consumeCallCount).toBe(2);
   });
 
@@ -124,15 +143,46 @@ describe('RabbitMQTransport – consumer recreation on reconnect', () => {
       received.push(envelope);
     });
 
-    // Trigger reconnect
     const triggerClose = closeHandlers[0];
     if (!triggerClose)
       throw new Error('no close handler captured from mock connection');
     triggerClose();
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    // After reconnect the consumer should be active. Simulate message delivery
-    // by invoking the consume callback captured in the mock.
+    expect(consumeCallCount).toBe(2);
+  });
+
+  it('closes the previous (dead) connection before opening a new one', async () => {
+    await transport.subscribe('test.events', async () => {});
+
+    // Trigger a new connect (private method)
+    // biome-ignore lint/complexity/useLiteralKeys: private method
+    await transport['doConnect']();
+
+    // doConnect() must call close() on the stale first connection before
+    // creating a new one, so broker resources are not leaked.
+    expect(connectionCloseCounts[0]).toBe(1);
+  });
+
+  it('closes the new connection when post-connect setup fails during reconnect', async () => {
+    await transport.subscribe('test.events', async () => {});
+
+    // Make the second connection's confirm channel creation fail.
+    // ConnectionManager will retry; the third connection succeeds.
+    failConfirmChannelOnConnection = 1;
+
+    const triggerClose = closeHandlers[0];
+    if (!triggerClose)
+      throw new Error('no close handler captured from mock connection');
+    triggerClose();
+
+    // Wait for the failed attempt (~10 ms) + successful retry (~10 ms) + margin.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    // The failed connection (index 1) must be closed by the catch block so it
+    // does not leak as an open broker connection while the retry loop continues.
+    expect(connectionCloseCounts[1]).toBe(1);
+    // The successful retry (connection index 2) recreates the consumer.
     expect(consumeCallCount).toBe(2);
   });
 });

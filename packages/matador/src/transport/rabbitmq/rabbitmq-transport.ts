@@ -572,7 +572,19 @@ export class RabbitMQTransport implements Transport {
   }
 
   private async doConnect(): Promise<void> {
+    // Close any existing connection before opening a new one
+    if (this.connection) {
+      try {
+        await this.connection.close();
+      } catch {
+        // Can happen if the connection is already closed
+      }
+      this.connection = null;
+      this.publishChannel = null; // channels belong to the old connection
+    }
+
     // Drop stale channel objects so getOrCreateQueueChannel opens fresh ones
+    // on the new connection during intent replay below.
     this.queueChannels.clear();
 
     this.logger.info(
@@ -597,6 +609,9 @@ export class RabbitMQTransport implements Transport {
           consumer.active = false;
         }
       }
+      this.connection = null;
+      this.publishChannel = null;
+
       if (this.connectionManager.isConnected()) {
         // Unexpected close, trigger reconnection
         this.connectionManager.handleConnectionLost(
@@ -605,22 +620,33 @@ export class RabbitMQTransport implements Transport {
       }
     });
 
-    // Create the publish channel.
-    // A confirm channel so publishes can await broker acknowledgement.
-    this.publishChannel = await connection.createConfirmChannel();
+    try {
+      // A confirm channel so publishes can await broker acknowledgement
+      this.publishChannel = await connection.createConfirmChannel();
 
-    // Handle publish channel errors to prevent unhandled error events
-    this.publishChannel.on('error', (err: Error) => {
-      this.logger.error('[Matador] 🔴 RabbitMQ publish channel error', err);
-    });
+      // Handle publish channel errors to prevent unhandled error events
+      this.publishChannel.on('error', (err: Error) => {
+        this.logger.error('[Matador] 🔴 RabbitMQ publish channel error', err);
+      });
 
-    // Re-apply topology if we have one (reconnection scenario)
-    if (this.topology) {
-      await this.applyTopology(this.topology);
-      // Recreate consumers for every active subscription on the new connection.
-      for (const intent of this.subscriptionIntents) {
-        await this.activateIntent(intent);
+      // Re-apply topology if we have one (reconnection scenario)
+      if (this.topology) {
+        await this.applyTopology(this.topology);
+        // Recreate consumers for every active subscription on the new connection.
+        for (const intent of this.subscriptionIntents) {
+          await this.activateIntent(intent);
+        }
       }
+    } catch (err) {
+      // Setup failed after the connection was opened - close it so that it doesn't leak
+      try {
+        await connection.close();
+      } catch {
+        // Ignore errors during cleanup
+      }
+      this.connection = null;
+      this.publishChannel = null;
+      throw err;
     }
 
     this.logger.info('[Matador] 🔌 Connected to RabbitMQ');
