@@ -182,6 +182,19 @@ export class RabbitMQTransport implements Transport {
     return this.connectionManager.isConnected();
   }
 
+  /**
+   * Registers a callback to fire each time the transport (here RabbitMQ) successfully (re)connects
+   * @param callback - The callback to fire when the transport (here RabbitMQ) successfully (re)connects
+   * @returns A function to unsubscribe from the callback
+   */
+  onConnected(callback: () => void): () => void {
+    return this.connectionManager.onStateChange((state) => {
+      if (state.status === 'connected') {
+        callback();
+      }
+    });
+  }
+
   async applyTopology(topology: Topology): Promise<void> {
     this.topology = topology;
 

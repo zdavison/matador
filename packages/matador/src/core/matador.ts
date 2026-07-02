@@ -368,6 +368,7 @@ export class Matador implements Dispatcher {
       return;
     }
 
+    this.fanout.dispose();
     await this.shutdownManager.shutdown();
     this.started = false;
   }

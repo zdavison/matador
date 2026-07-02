@@ -409,6 +409,7 @@ describe('Matador', () => {
       const thrown = await matador
         .send(
           new UserCreatedEvent({ userId: '123', email: 'test@example.com' }),
+          { buffer: false },
         )
         .catch((e) => e);
 

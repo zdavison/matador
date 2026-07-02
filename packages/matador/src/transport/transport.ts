@@ -181,6 +181,13 @@ export interface Transport {
   ): Promise<Subscription>;
 
   /**
+   * Registers a callback to fire each time the transport successfully (re)connects.
+   * Returns a function that removes the listener when called.
+   * Optional: only meaningful for transports that can lose and regain a connection.
+   */
+  onConnected?(callback: () => void): () => void;
+
+  /**
    * Acknowledges/completes a message.
    * Called after processing is done (success, retry scheduled, or dead-lettered).
    */

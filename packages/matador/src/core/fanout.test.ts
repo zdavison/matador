@@ -4,6 +4,7 @@ import { SafeHooks } from '../hooks/index.js';
 import type { MatadorHooks } from '../hooks/index.js';
 import { SchemaRegistry } from '../schema/index.js';
 import { TopologyBuilder } from '../topology/index.js';
+import { MultiTransport } from '../transport/index.js';
 import type { Transport } from '../transport/index.js';
 import {
   MatadorEvent,
@@ -659,7 +660,7 @@ describe('FanoutEngine', () => {
   });
 
   describe('error handling', () => {
-    it('should capture error when transport.send fails', async () => {
+    it('should capture error when transport.send fails and buffer is disabled', async () => {
       const sendError = new Error('Network timeout');
       const failingTransport: Transport = {
         ...transport,
@@ -692,6 +693,7 @@ describe('FanoutEngine', () => {
       const result = await fanoutWithFailingTransport.send(
         UserCreatedEvent,
         event,
+        { buffer: false },
       );
 
       expect(result.subscribersSent).toBe(0);
@@ -744,6 +746,7 @@ describe('FanoutEngine', () => {
       const result = await fanoutWithFailingTransport.send(
         UserCreatedEvent,
         event,
+        { buffer: false },
       );
 
       expect(result.subscribersSent).toBe(1);
@@ -784,6 +787,7 @@ describe('FanoutEngine', () => {
       const result = await fanoutWithFailingTransport.send(
         UserCreatedEvent,
         event,
+        { buffer: false },
       );
 
       expect(result.errors).toHaveLength(1);
@@ -1101,7 +1105,9 @@ describe('FanoutEngine', () => {
         email: 'test@example.com',
       });
 
-      await fanoutWithHooks.send(UserCreatedEvent, event);
+      await fanoutWithHooks.send(UserCreatedEvent, event, {
+        throwOnBufferedFailure: true,
+      });
 
       expect(onEnqueueError).toHaveBeenCalledTimes(1);
       expect(onEnqueueError).toHaveBeenCalledWith({
@@ -1360,6 +1366,467 @@ describe('FanoutEngine', () => {
       const envelope = (transport.send as ReturnType<typeof mock>).mock
         .calls[0]?.[1] as Envelope;
       expect(envelope.docket.importance).toBe('should-investigate');
+    });
+  });
+
+  describe('retry buffering', () => {
+    it('should buffer a failed send and not return it as an error', async () => {
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const failingTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Connection lost');
+        }),
+      };
+
+      const fanoutWithFailingTransport = new FanoutEngine({
+        transport: failingTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+      const result = await fanoutWithFailingTransport.send(
+        UserCreatedEvent,
+        event,
+      );
+
+      expect(result.errors).toHaveLength(0);
+      expect(result.subscribersSent).toBe(0);
+    });
+
+    it('should buffer stub failures too', async () => {
+      const stub = createSubscriberStub({ name: 'remote-service' });
+
+      schema.register(UserCreatedEvent, [stub]);
+
+      const failingTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Connection lost');
+        }),
+      };
+
+      const fanoutWithFailingTransport = new FanoutEngine({
+        transport: failingTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+      const result = await fanoutWithFailingTransport.send(
+        UserCreatedEvent,
+        event,
+      );
+
+      expect(result.errors).toHaveLength(0);
+      expect(result.subscribersSent).toBe(0);
+    });
+
+    it('should flush buffered messages when onConnected fires', async () => {
+      let connectedCallback: (() => void) | undefined;
+
+      const failThenSucceed = mock(async () => {
+        throw new Error('Connection lost');
+      });
+
+      const transportWithReconnect: Transport = {
+        ...transport,
+        send: failThenSucceed,
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithReconnect = new FanoutEngine({
+        transport: transportWithReconnect,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      // First send — transport fails, message should be buffered
+      await fanoutWithReconnect.send(UserCreatedEvent, event);
+      expect(failThenSucceed).toHaveBeenCalledTimes(1);
+
+      // Simulate reconnect — now send succeeds
+      (
+        transportWithReconnect.send as ReturnType<typeof mock>
+      ).mockImplementation(async () => 'mock');
+
+      expect(connectedCallback).toBeDefined();
+      connectedCallback?.();
+
+      // Give the async flush a chance to run
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(transportWithReconnect.send).toHaveBeenCalledTimes(2);
+    });
+
+    it('should re-buffer on flush failure and retry on next reconnect', async () => {
+      let connectedCallback: (() => void) | undefined;
+
+      const transportWithReconnect: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Still down');
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithReconnect = new FanoutEngine({
+        transport: transportWithReconnect,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      await fanoutWithReconnect.send(UserCreatedEvent, event);
+      expect(transportWithReconnect.send).toHaveBeenCalledTimes(1);
+
+      // Simulate reconnect — flush fails, item should be re-buffered
+      connectedCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // send was attempted again during the flush
+      expect(transportWithReconnect.send).toHaveBeenCalledTimes(2);
+
+      // Simulate a second reconnect — should retry again
+      connectedCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(transportWithReconnect.send).toHaveBeenCalledTimes(3);
+    });
+
+    it('should not buffer when transport works fine', async () => {
+      let connectedCallback: (() => void) | undefined;
+
+      const successTransport: Transport = {
+        ...transport,
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithReconnect = new FanoutEngine({
+        transport: successTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+      const result = await fanoutWithReconnect.send(UserCreatedEvent, event);
+
+      expect(result.subscribersSent).toBe(1);
+      expect(result.errors).toHaveLength(0);
+
+      // onConnected fires — nothing buffered so flush is a no-op
+      connectedCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // Only one call total (the original send — not a spurious re-send)
+      expect(successTransport.send).toHaveBeenCalledTimes(1);
+    });
+
+    it('should report error in result when buffer is false', async () => {
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const failingTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Connection lost');
+        }),
+      };
+
+      const fanoutWithFailingTransport = new FanoutEngine({
+        transport: failingTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+      const result = await fanoutWithFailingTransport.send(
+        UserCreatedEvent,
+        event,
+        { buffer: false },
+      );
+
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]?.subscriberName).toBe('handle-user');
+      expect(result.errors[0]?.error).toBeInstanceOf(TransportSendError);
+    });
+
+    it('should both buffer and report error when reportBufferedFailure is true', async () => {
+      let connectedCallback: (() => void) | undefined;
+
+      const failingTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Connection lost');
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithReconnect = new FanoutEngine({
+        transport: failingTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+      const result = await fanoutWithReconnect.send(UserCreatedEvent, event, {
+        throwOnBufferedFailure: true,
+      });
+
+      // Error is reported immediately
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]?.subscriberName).toBe('handle-user');
+      // But it was also buffered — it should retry on reconnect
+      (failingTransport.send as ReturnType<typeof mock>).mockImplementation(
+        async () => 'mock',
+      );
+      connectedCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(failingTransport.send).toHaveBeenCalledTimes(2);
+    });
+
+    it('should unsubscribe the onConnected listener when dispose() is called', () => {
+      const unsubscribe = mock(() => {});
+
+      const transportWithOnConnected: Transport = {
+        ...transport,
+        onConnected: mock((_cb) => unsubscribe),
+      };
+
+      const fanout = new FanoutEngine({
+        transport: transportWithOnConnected,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      expect(unsubscribe).not.toHaveBeenCalled();
+      fanout.dispose();
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+    });
+
+    it('should drop and report error when retry buffer is full', async () => {
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const failingTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Connection lost');
+        }),
+      };
+
+      const fanoutWithSmallBuffer = new FanoutEngine({
+        transport: failingTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+        maxRetryBufferSize: 1,
+      });
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      // First send fills the buffer
+      const first = await fanoutWithSmallBuffer.send(UserCreatedEvent, event);
+      expect(first.errors).toHaveLength(0);
+
+      // Second send hits the full buffer — must report an error
+      const second = await fanoutWithSmallBuffer.send(UserCreatedEvent, event);
+      expect(second.errors).toHaveLength(1);
+      expect(second.errors[0]?.error).toBeInstanceOf(TransportSendError);
+    });
+
+    it('should report buffer-full drop via onEnqueueError on initial send', async () => {
+      const onEnqueueError = mock(async () => {});
+      const hooksInstance = new SafeHooks({
+        onEnqueueError,
+      } satisfies MatadorHooks);
+
+      const failingTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Connection lost');
+        }),
+      };
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const fanoutWithSmallBuffer = new FanoutEngine({
+        transport: failingTransport,
+        schema,
+        hooks: hooksInstance,
+        topology: testTopology,
+        defaultQueue: 'events',
+        maxRetryBufferSize: 1,
+      });
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      // First send fills the buffer — no error reported to caller or hook
+      const first = await fanoutWithSmallBuffer.send(UserCreatedEvent, event);
+      expect(first.errors).toHaveLength(0);
+      expect(onEnqueueError).not.toHaveBeenCalled();
+
+      // Second send finds the buffer full — onEnqueueError fires and error is returned
+      const second = await fanoutWithSmallBuffer.send(UserCreatedEvent, event);
+      expect(second.errors).toHaveLength(1);
+      expect(onEnqueueError).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not buffer when a fallback transport succeeds after the primary fails', async () => {
+      const rabbitMock: Transport = {
+        ...transport,
+        name: 'rabbitmq',
+        send: mock(async () => {
+          throw new Error('RabbitMQ down');
+        }),
+      };
+      const localMock: Transport = {
+        ...transport,
+        name: 'local',
+        send: mock(async () => 'local'),
+      };
+
+      const multiTransport = new MultiTransport({
+        transports: [rabbitMock, localMock],
+      });
+
+      const fanoutWithMulti = new FanoutEngine({
+        transport: multiTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      const result = await fanoutWithMulti.send(UserCreatedEvent, event);
+
+      expect(result.subscribersSent).toBe(1);
+      expect(result.errors).toHaveLength(0);
+      expect(rabbitMock.send).toHaveBeenCalledTimes(1);
+      expect(localMock.send).toHaveBeenCalledTimes(1);
+      expect(fanoutWithMulti.eventsBeingEnqueuedCount).toBe(0);
     });
   });
 });
