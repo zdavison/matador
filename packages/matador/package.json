@@ -1,6 +1,6 @@
 {
   "name": "@zdavison/matador",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "description": "A batteries-included event system.",
   "type": "module",
   "main": "./dist/index.cjs",
