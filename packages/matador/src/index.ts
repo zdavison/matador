@@ -200,6 +200,7 @@ export {
   SomeSendError,
   AllTransportsFailedError,
   DelayedMessagesNotSupportedError,
+  LocalTransportNoActiveSubscriberError,
   // Schema & configuration errors
   EventNotRegisteredError,
   isEventNotRegisteredError,
@@ -208,7 +209,6 @@ export {
   NoSubscribersExistError,
   InvalidSchemaError,
   SubscriberIsStubError,
-  LocalTransportCannotProcessStubError,
   // Queue errors
   QueueNotFoundError,
   UnknownQueueReferenceError,

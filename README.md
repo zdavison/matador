@@ -739,12 +739,12 @@ All errors in **Matador** extend `MatadorError` and include a `description` fiel
 | `SomeSendError`                | One or more subscriber publishes failed during `send()`. Contains an `errors` array with per-failure details (`subscriberName`, `queue`, `error`). |
 | `TransportSendError`              | Failed to send a single message through the transport. Wrapped inside `SomeSendError.errors[n].error` as the underlying cause.                                             |
 | `DelayedMessagesNotSupportedError`| Delayed messages requested but transport doesn't support them.                             |
+| `LocalTransportNoActiveSubscriberError` | LocalTransport has no active subscriber for the queue (e.g. a stub subscriber, or matador.start() hasn't subscribed yet). |
 | `EventNotRegisteredError`         | Event type is not registered in the schema.                                                |
 | `SubscriberNotRegisteredError`    | Subscriber is not registered for this event.                                               |
 | `NoSubscribersExistError`         | Event has no subscribers registered.                                                       |
 | `InvalidSchemaError`              | Schema configuration is invalid.                                                           |
 | `SubscriberIsStubError`           | A SubscriberStub was registered in a consuming schema.                                     |
-| `LocalTransportCannotProcessStubError` | LocalTransport cannot process events for SubscriberStubs.                             |
 | `QueueNotFoundError`              | Queue does not exist or has not been created.                                              |
 | `InvalidEventError`               | Event is invalid or missing required fields.                                               |
 | `MessageMaybePoisonedError`       | Message redelivered too many times (possible poison message).                              |

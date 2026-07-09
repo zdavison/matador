@@ -105,6 +105,7 @@ describe('MultiTransport', () => {
   describe('send - primary success', () => {
     beforeEach(async () => {
       await transport.connect();
+      await transport.subscribe('test-queue', async () => {});
     });
 
     it('should send to primary transport when it succeeds', async () => {
@@ -133,6 +134,7 @@ describe('MultiTransport', () => {
   describe('send - fallback', () => {
     beforeEach(async () => {
       await transport.connect();
+      await transport.subscribe('test-queue', async () => {});
     });
 
     it('should fallback when primary fails', async () => {
@@ -185,6 +187,7 @@ describe('MultiTransport', () => {
         transports: [primary, secondary, third],
       });
       await multiTransport.connect();
+      await third.subscribe('test-queue', async () => {});
 
       // Make primary and secondary fail
       await primary.disconnect();
@@ -272,6 +275,7 @@ describe('MultiTransport', () => {
   describe('complete', () => {
     beforeEach(async () => {
       await transport.connect();
+      await primary.subscribe('test-queue', async () => {});
     });
 
     it('should complete using primary transport', async () => {
@@ -289,6 +293,7 @@ describe('MultiTransport', () => {
   describe('sendToDeadLetter', () => {
     beforeEach(async () => {
       await transport.connect();
+      await primary.subscribe('test-queue', async () => {});
     });
 
     it('should send to dead letter using primary transport', async () => {

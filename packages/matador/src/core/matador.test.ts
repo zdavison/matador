@@ -264,7 +264,12 @@ describe('Matador', () => {
         [UserCreatedEvent.key]: [UserCreatedEvent, [subscriber]],
       };
 
-      matador = new Matador({ transport, topology, schema });
+      matador = new Matador({
+        transport,
+        topology,
+        schema,
+        consumeFrom: ['events'],
+      });
 
       await matador.start();
 
@@ -295,7 +300,12 @@ describe('Matador', () => {
         [UserCreatedEvent.key]: [UserCreatedEvent, [subscriber]],
       };
 
-      matador = new Matador({ transport, topology, schema });
+      matador = new Matador({
+        transport,
+        topology,
+        schema,
+        consumeFrom: ['events'],
+      });
 
       await matador.start();
 
@@ -335,7 +345,12 @@ describe('Matador', () => {
         [UserCreatedEvent.key]: [UserCreatedEvent, [sub1, sub2, sub3]],
       };
 
-      matador = new Matador({ transport, topology, schema });
+      matador = new Matador({
+        transport,
+        topology,
+        schema,
+        consumeFrom: ['events'],
+      });
 
       await matador.start();
 
@@ -365,7 +380,12 @@ describe('Matador', () => {
         [UserCreatedEvent.key]: [UserCreatedEvent, [subscriber]],
       };
 
-      matador = new Matador({ transport, topology, schema });
+      matador = new Matador({
+        transport,
+        topology,
+        schema,
+        consumeFrom: ['events'],
+      });
 
       await matador.start();
 
@@ -626,9 +646,22 @@ describe('Matador', () => {
         [UserCreatedEvent.key]: [UserCreatedEvent, [subscriber]],
       };
 
-      matador = new Matador({ transport, topology, schema });
+      matador = new Matador({
+        transport,
+        topology,
+        schema,
+        consumeFrom: ['events'],
+      });
 
       await matador.start();
+
+      // stopReceiving() unsubscribes this instance's own handler. With a real
+      // broker, the queue would still exist independently (another replica,
+      // or this instance after restart, could pick the message up) — simulate
+      // that here with a subscription outside Matador's own lifecycle so
+      // LocalTransport still has somewhere to deliver to.
+      await transport.subscribe('matador.test.events', async () => {});
+
       await matador.stopReceiving();
 
       const event = new UserCreatedEvent({

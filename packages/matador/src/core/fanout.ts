@@ -21,6 +21,8 @@ interface BufferedSend {
   readonly envelope: Envelope;
   readonly sendOptions: SendOptions | undefined;
   readonly subscriberName: string;
+  /** Number of retry attempts made since this was first buffered. */
+  attempts: number;
 }
 
 /**
@@ -33,6 +35,26 @@ export interface FanoutConfig {
   readonly topology: Topology;
   readonly defaultQueue: string;
   readonly maxRetryBufferSize?: number | undefined;
+
+  /**
+   * Maximum number of retry attempts for a buffered message before it's
+   * dropped and reported via onEnqueueError, instead of being retried forever.
+   *
+   * @default undefined (no limit — retries until the buffer flushes successfully)
+   */
+  readonly maxRetryAttempts?: number | undefined;
+
+  /**
+   * How often (in ms) to attempt flushing the retry buffer, independent of
+   * transport reconnect events. This covers the case where the transport
+   * stays connected but an individual publish keeps failing (e.g. broker
+   * nack, publish confirm timeout) — onConnected never fires again for
+   * that, so nothing would otherwise retry it.
+   *
+   * @default 30000. Pass 0 to disable the interval and rely on
+   * onConnected/manual flushes only.
+   */
+  readonly retryIntervalMs?: number | undefined;
 }
 
 /**
@@ -72,7 +94,9 @@ export class FanoutEngine {
   private enqueuingCount = 0;
   private readonly retryBuffer: BufferedSend[] = [];
   private readonly maxRetryBufferSize: number;
+  private readonly maxRetryAttempts: number | undefined;
   private readonly disposeOnConnected: (() => void) | undefined;
+  private readonly retryTimer: ReturnType<typeof setInterval> | undefined;
 
   constructor(config: FanoutConfig) {
     this.transport = config.transport;
@@ -81,17 +105,30 @@ export class FanoutEngine {
     this.topology = config.topology;
     this.defaultQueue = config.defaultQueue;
     this.maxRetryBufferSize = config.maxRetryBufferSize ?? 5000;
+    this.maxRetryAttempts = config.maxRetryAttempts;
 
     // If the transport supports it, add a callback to flush the retry buffer when the transport reconnects
     // The returned value is a function to unsubscribe from the callback
     this.disposeOnConnected = this.transport.onConnected?.(() => {
       void this.flushRetryBuffer();
     });
+
+    // Also flush periodically: onConnected only fires on connection-level
+    // reconnects, so it never fires when the transport stays connected but
+    // an individual publish keeps failing (e.g. broker nack, confirm timeout).
+    const retryIntervalMs = config.retryIntervalMs ?? 30_000;
+    if (retryIntervalMs > 0) {
+      this.retryTimer = setInterval(() => {
+        void this.flushRetryBuffer();
+      }, retryIntervalMs);
+      this.retryTimer.unref?.();
+    }
   }
 
   dispose(): void {
     // Unsubscribe from the callback (that flushes the retry buffer when the transport reconnects)
     this.disposeOnConnected?.();
+    clearInterval(this.retryTimer);
   }
 
   /**
@@ -178,6 +215,7 @@ export class FanoutEngine {
             envelope,
             sendOptions,
             subscriberName: subscriber.name,
+            attempts: 0,
           });
           this.hooks.logger.warn(
             `[Matador] 🟡 Message for '${subscriber.name}' buffered for retry on reconnect (buffer: ${this.retryBuffer.length}/${this.maxRetryBufferSize}).`,
@@ -258,19 +296,7 @@ export class FanoutEngine {
           transport: usedTransport,
         });
       } catch (error) {
-        // Re-buffer on failure; it will be retried on the next reconnect.
-        if (this.retryBuffer.length < this.maxRetryBufferSize) {
-          this.retryBuffer.push(item);
-        } else {
-          const cause =
-            error instanceof Error ? error : new Error(String(error));
-          const err = new TransportSendError(item.queue, cause);
-          await this.hooks.onEnqueueError({
-            envelope: item.envelope,
-            error: err,
-            transport: this.transport.name,
-          });
-        }
+        await this.handleFlushFailure(item, error);
       } finally {
         this.enqueuingCount--;
       }
@@ -279,13 +305,51 @@ export class FanoutEngine {
     const remaining = this.retryBuffer.length;
     if (remaining > 0) {
       this.hooks.logger.warn(
-        `[Matador] 🟡 ${remaining} buffered message(s) could not be flushed; will retry on next reconnect.`,
+        `[Matador] 🟡 ${remaining} buffered message(s) could not be flushed; will retry later.`,
       );
     } else {
       this.hooks.logger.info(
         '[Matador] 🟢 All buffered messages flushed successfully.',
       );
     }
+  }
+
+  /**
+   * Handles a failed flush attempt for a single buffered item: drops it once
+   * maxRetryAttempts is exceeded, otherwise re-buffers it (unless the buffer
+   * is full, in which case it's dropped too).
+   */
+  private async handleFlushFailure(
+    item: BufferedSend,
+    error: unknown,
+  ): Promise<void> {
+    item.attempts++;
+    const cause = error instanceof Error ? error : new Error(String(error));
+    const exceededAttempts =
+      this.maxRetryAttempts !== undefined &&
+      item.attempts >= this.maxRetryAttempts;
+
+    if (
+      !exceededAttempts &&
+      this.retryBuffer.length < this.maxRetryBufferSize
+    ) {
+      // Re-buffer on failure; it will be retried on the next reconnect or flush interval.
+      this.retryBuffer.push(item);
+      return;
+    }
+
+    if (exceededAttempts) {
+      this.hooks.logger.error(
+        `[Matador] 🔴 Message for '${item.subscriberName}' exceeded max retry attempts (${this.maxRetryAttempts}) and will not be retried further.`,
+      );
+    }
+
+    const err = new TransportSendError(item.queue, cause);
+    await this.hooks.onEnqueueError({
+      envelope: item.envelope,
+      error: err,
+      transport: this.transport.name,
+    });
   }
 
   private async isSubscriberEnabled(

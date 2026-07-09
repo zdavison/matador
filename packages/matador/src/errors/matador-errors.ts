@@ -219,6 +219,27 @@ export class DelayedMessagesNotSupportedError extends MatadorError {
   }
 }
 
+/**
+ * Thrown when a LocalTransport is sent a message for a queue with no active
+ * subscriber in the current process (e.g. the subscriber is a SubscriberStub
+ * implemented in another service, or matador.start() hasn't subscribed yet).
+ */
+export class LocalTransportNoActiveSubscriberError extends MatadorError {
+  readonly description =
+    'The LocalTransport has no active subscriber for this queue in the current process, ' +
+    'so it cannot guarantee delivery. ' +
+    'ACTION: If the subscriber is a SubscriberStub (implemented in another service), ' +
+    'the local transport can never deliver it locally — a distributed transport like ' +
+    'RabbitMQ is required. If the subscriber should run in this process, ensure ' +
+    'matador.start() has subscribed to this queue before sending.';
+
+  constructor(public readonly queue: string) {
+    super(
+      `LocalTransport has no active subscriber for queue "${queue}"; message cannot be delivered.`,
+    );
+  }
+}
+
 // ============================================================================
 // Schema & Configuration Errors
 // ============================================================================
@@ -313,23 +334,6 @@ export class SubscriberIsStubError extends MatadorError {
   constructor(public readonly subscriberName: string) {
     super(
       `Subscriber "${subscriberName}" is a stub and cannot be processed locally. Replace with a full Subscriber implementation in the consumer schema.`,
-    );
-  }
-}
-
-/**
- * Thrown when a LocalTransport tries to process a stub subscriber.
- */
-export class LocalTransportCannotProcessStubError extends MatadorError {
-  readonly description =
-    'The LocalTransport cannot process events for SubscriberStubs. ' +
-    'ACTION: SubscriberStubs represent remote implementations that only RabbitMQ can route. ' +
-    'If using LocalTransport for testing, provide mock implementations instead of stubs. ' +
-    'For production fallback scenarios, be aware that stub-targeted events will be dropped.';
-
-  constructor(public readonly subscriberName: string) {
-    super(
-      `LocalTransport cannot process stub subscriber "${subscriberName}". Stub subscribers require a distributed transport like RabbitMQ.`,
     );
   }
 }
