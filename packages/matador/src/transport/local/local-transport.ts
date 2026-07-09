@@ -48,6 +48,13 @@ interface ActiveSubscription {
 }
 
 /**
+ * Maximum number of completed message receipts to retain.
+ * Oldest receipts are dropped once this limit is exceeded, so long-running
+ * usage (e.g. as a fallback transport) doesn't grow this list forever.
+ */
+const MAX_COMPLETED_MESSAGES = 1000;
+
+/**
  * Local in-memory transport for testing and fallback.
  * Messages are stored in memory and delivered synchronously.
  */
@@ -56,7 +63,7 @@ export class LocalTransport implements Transport {
   readonly capabilities = localCapabilities;
 
   private connected = false;
-  private readonly queues = new Map<string, QueuedMessage[]>();
+  private readonly queues = new Map<string, Map<string, QueuedMessage>>();
   private readonly subscriptions = new Map<string, ActiveSubscription[]>();
   private readonly completedMessages: MessageReceipt[] = [];
   private readonly delayedTimers = new Set<ReturnType<typeof setTimeout>>();
@@ -109,7 +116,7 @@ export class LocalTransport implements Transport {
         topology.prefix,
       );
       if (!this.queues.has(queueName)) {
-        this.queues.set(queueName, []);
+        this.queues.set(queueName, new Map());
       }
     }
   }
@@ -182,7 +189,7 @@ export class LocalTransport implements Transport {
       completed: false,
     };
 
-    messages.push(queuedMessage);
+    messages.set(messageId, queuedMessage);
 
     await this.deliverToSubscribers(queue, queuedMessage);
   }
@@ -237,7 +244,7 @@ export class LocalTransport implements Transport {
     this.subscriptions.set(queue, subs);
 
     // Deliver any pending messages
-    const messages = this.queues.get(queue) ?? [];
+    const messages = this.queues.get(queue)?.values() ?? [];
     for (const message of messages) {
       if (message.completed) continue;
       await this.deliverToSubscribers(queue, message);
@@ -253,6 +260,10 @@ export class LocalTransport implements Transport {
           this.subscriptions.delete(queue);
         }
       },
+      // No-op: LocalTransport is only ever fed from within the process
+      // So, when shutting down, it needs to continue and handle new messages until the end
+      // As, an ongoing message (before shutdown) could create new (local) messages
+      pauseForShutdown: async () => {},
       get isActive() {
         return subscription.active;
       },
@@ -263,6 +274,11 @@ export class LocalTransport implements Transport {
     const message = receipt.handle as QueuedMessage;
     message.completed = true;
     this.completedMessages.push(receipt);
+    if (this.completedMessages.length > MAX_COMPLETED_MESSAGES) {
+      this.completedMessages.shift();
+    }
+
+    this.queues.get(receipt.sourceQueue)?.delete(message.id);
   }
 
   async sendToDeadLetter(
@@ -282,9 +298,7 @@ export class LocalTransport implements Transport {
    * Gets the current size of a queue.
    */
   getQueueSize(queue: string): number {
-    const messages = this.queues.get(queue);
-    if (!messages) return 0;
-    return messages.filter((m) => !m.completed).length;
+    return this.queues.get(queue)?.size ?? 0;
   }
 
   /**
@@ -300,7 +314,7 @@ export class LocalTransport implements Transport {
   getPendingMessages(queue: string): readonly Envelope[] {
     const messages = this.queues.get(queue);
     if (!messages) return [];
-    return messages.filter((m) => !m.completed).map((m) => m.envelope);
+    return Array.from(messages.values()).map((m) => m.envelope);
   }
 
   /**
@@ -328,7 +342,7 @@ export class LocalTransport implements Transport {
     const messages = this.queues.get(queue);
     if (!messages) return null;
 
-    const pending = messages.find((m) => !m.completed);
+    const pending = messages.values().next().value;
     if (!pending) return null;
 
     const receipt: MessageReceipt = {
@@ -343,10 +357,10 @@ export class LocalTransport implements Transport {
     return { envelope: pending.envelope, receipt };
   }
 
-  private getOrCreateQueue(queue: string): QueuedMessage[] {
+  private getOrCreateQueue(queue: string): Map<string, QueuedMessage> {
     let messages = this.queues.get(queue);
     if (!messages) {
-      messages = [];
+      messages = new Map();
       this.queues.set(queue, messages);
     }
     return messages;
