@@ -87,6 +87,31 @@ describe('LocalTransport', () => {
       const received = await transport.receiveOne('empty-queue');
       expect(received).toBeNull();
     });
+
+    it('should preserve FIFO order of pending messages', async () => {
+      const envelopes = [0, 1, 2].map((seq) =>
+        createEnvelope({
+          eventKey: 'test.event',
+          targetSubscriber: 'test-subscriber',
+          data: { seq },
+          importance: 'should-investigate',
+        }),
+      );
+
+      for (const envelope of envelopes) {
+        await transport.send('test-queue', envelope);
+      }
+
+      expect(
+        transport.getPendingMessages('test-queue').map((e) => e.data),
+      ).toEqual([{ seq: 0 }, { seq: 1 }, { seq: 2 }]);
+
+      for (const envelope of envelopes) {
+        const received = await transport.receiveOne('test-queue');
+        expect(received?.envelope.id).toBe(envelope.id);
+        if (received) await transport.complete(received.receipt);
+      }
+    });
   });
 
   describe('subscriptions', () => {
