@@ -14,6 +14,12 @@ import type {
 import { createEnvelope } from '../types/index.js';
 
 /**
+ * Number of consecutive flush failures tolerated within a single flush pass
+ * before bailing out early and re-buffering the untried remainder.
+ */
+const MAX_CONSECUTIVE_FLUSH_FAILURES = 10;
+
+/**
  * A send that failed (all transports exhausted) and was held in-memory for retry on reconnect.
  */
 interface BufferedSend {
@@ -218,7 +224,13 @@ export class FanoutEngine {
             attempts: 0,
           });
           this.hooks.logger.warn(
-            `[Matador] 🟡 Message for '${subscriber.name}' buffered for retry on reconnect (buffer: ${this.retryBuffer.length}/${this.maxRetryBufferSize}).`,
+            `[Matador] 🟡 Message for '${subscriber.name}' buffered for retry on reconnect.`,
+            {
+              queue: qualifiedQueue,
+              subscriberName: subscriber.name,
+              bufferSize: this.retryBuffer.length,
+              maxBufferSize: this.maxRetryBufferSize,
+            },
           );
 
           if (options.throwOnBufferedFailure) {
@@ -268,6 +280,32 @@ export class FanoutEngine {
   }
 
   /**
+   * Attempts a single buffered item during a flush pass
+   * @returns true if the attempt succeeded; false on failure
+   */
+  private async attemptFlushItem(item: BufferedSend): Promise<boolean> {
+    this.enqueuingCount++;
+    try {
+      const usedTransport = await this.transport.send(
+        item.queue,
+        item.envelope,
+        item.sendOptions,
+      );
+      await this.hooks.onEnqueueSuccess({
+        envelope: item.envelope,
+        queue: item.queue,
+        transport: usedTransport,
+      });
+      return true;
+    } catch (error) {
+      await this.handleFlushFailure(item, error);
+      return false;
+    } finally {
+      this.enqueuingCount--;
+    }
+  }
+
+  /**
    * Flushes the retry buffer
    *
    * This is called when the transport reconnects, and is used to retry any messages that were buffered while the transport was disconnected
@@ -281,24 +319,29 @@ export class FanoutEngine {
 
     // Drain the buffer atomically so concurrent flush calls don't double-send.
     const toFlush = this.retryBuffer.splice(0);
+    let consecutiveFailures = 0;
 
-    for (const item of toFlush) {
-      this.enqueuingCount++;
-      try {
-        const usedTransport = await this.transport.send(
-          item.queue,
-          item.envelope,
-          item.sendOptions,
-        );
-        await this.hooks.onEnqueueSuccess({
-          envelope: item.envelope,
-          queue: item.queue,
-          transport: usedTransport,
-        });
-      } catch (error) {
-        await this.handleFlushFailure(item, error);
-      } finally {
-        this.enqueuingCount--;
+    for (let i = 0; i < toFlush.length; i++) {
+      const item = toFlush[i];
+      if (!item) continue;
+
+      const succeeded = await this.attemptFlushItem(item);
+
+      // A success means the transport is actually working, so it resets the
+      // streak — isolated failures scattered across a healthy pass shouldn't
+      // trip the breaker, only a sustained run of them should.
+      consecutiveFailures = succeeded ? 0 : consecutiveFailures + 1;
+
+      if (consecutiveFailures >= MAX_CONSECUTIVE_FLUSH_FAILURES) {
+        // A run of failures this long is more likely a systemic/connection-level
+        // issue (broker down, slow, rejecting everything) than something specific
+        // to these messages.
+        // Stopping early so that we don't retry 5k messages for nothing
+        const untried = toFlush.slice(i + 1);
+        if (untried.length > 0) {
+          await this.rebufferUntried(untried, consecutiveFailures);
+        }
+        break;
       }
     }
 
@@ -311,6 +354,50 @@ export class FanoutEngine {
       this.hooks.logger.info(
         '[Matador] 🟢 All buffered messages flushed successfully.',
       );
+    }
+  }
+
+  /**
+   * Re-buffers messages that were never attempted because a flush pass
+   * stopped out early. Respects maxRetryBufferSize: concurrent sends can have
+   * refilled the buffer while this flush was running, so anything beyond
+   * remaining capacity is dropped and reported instead of silently growing
+   * the buffer past its cap.
+   */
+  private async rebufferUntried(
+    untried: BufferedSend[],
+    consecutiveFailures: number,
+  ): Promise<void> {
+    const capacity = Math.max(
+      0,
+      this.maxRetryBufferSize - this.retryBuffer.length,
+    );
+    const toRebuffer = untried.slice(0, capacity);
+    const dropped = untried.slice(capacity);
+
+    if (toRebuffer.length > 0) {
+      this.retryBuffer.unshift(...toRebuffer);
+    }
+
+    const droppedSuffix =
+      dropped.length > 0 ? `, ${dropped.length} dropped (buffer full).` : '.';
+    this.hooks.logger.warn(
+      `[Matador] 🟡 Stopping this flush pass after ${consecutiveFailures} consecutive failures; ${toRebuffer.length} untried message(s) re-buffered for the next attempt${droppedSuffix}`,
+    );
+
+    for (const item of dropped) {
+      this.hooks.logger.error(
+        `[Matador] 🔴 Retry buffer full (${this.maxRetryBufferSize}). Message for '${item.subscriberName}' dropped and will not be retried.`,
+      );
+      const err = new TransportSendError(
+        item.queue,
+        new Error('Retry buffer full'),
+      );
+      await this.hooks.onEnqueueError({
+        envelope: item.envelope,
+        error: err,
+        transport: this.transport.name,
+      });
     }
   }
 

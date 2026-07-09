@@ -2017,6 +2017,193 @@ describe('FanoutEngine', () => {
       fanoutWithInterval.dispose();
     });
 
+    it('should stop retrying the rest of the buffer after 10 consecutive failures in a flush pass', async () => {
+      let connectedCallback: (() => void) | undefined;
+      let shouldFail = true;
+
+      const flakyTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          if (shouldFail) throw new Error('Broker rejecting everything');
+          return 'mock';
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithReconnect = new FanoutEngine({
+        transport: flakyTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      // 12 sends buffered; flush bails after the 10th consecutive failure,
+      // leaving 2 untried.
+      for (let i = 0; i < 12; i++) {
+        await fanoutWithReconnect.send(UserCreatedEvent, event);
+      }
+      expect(flakyTransport.send).toHaveBeenCalledTimes(12);
+
+      connectedCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(flakyTransport.send).toHaveBeenCalledTimes(22);
+
+      // Recovery: next flush delivers all 12 re-buffered/untried items.
+      shouldFail = false;
+      connectedCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(flakyTransport.send).toHaveBeenCalledTimes(34);
+    });
+
+    it('should not trip the failure breaker on isolated failures interspersed with successes', async () => {
+      let connectedCallback: (() => void) | undefined;
+      let phase: 'buffering' | 'flushing' = 'buffering';
+      let flushCallIndex = 0;
+
+      const onEnqueueSuccess = mock(async () => {});
+      const hooksInstance = new SafeHooks({ onEnqueueSuccess });
+
+      const mostlyHealthyTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          if (phase === 'buffering') {
+            throw new Error('Initially down');
+          }
+          flushCallIndex++;
+          // Every 3rd flushed item fails — isolated, never two in a row.
+          if (flushCallIndex % 3 === 0) throw new Error('Occasional nack');
+          return 'mock';
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithReconnect = new FanoutEngine({
+        transport: mostlyHealthyTransport,
+        schema,
+        hooks: hooksInstance,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      for (let i = 0; i < 9; i++) {
+        await fanoutWithReconnect.send(UserCreatedEvent, event);
+      }
+      expect(mostlyHealthyTransport.send).toHaveBeenCalledTimes(9);
+
+      // Every 3rd flushed item fails, but never two in a row, so the
+      // breaker (threshold 10) never trips and all 9 get attempted.
+      phase = 'flushing';
+      connectedCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(mostlyHealthyTransport.send).toHaveBeenCalledTimes(9 + 9);
+      expect(onEnqueueSuccess).toHaveBeenCalledTimes(9 - 3);
+    });
+
+    it('should drop untried messages that no longer fit once maxRetryBufferSize is hit by concurrent buffering', async () => {
+      let connectedCallback: (() => void) | undefined;
+      let phase: 'buffering' | 'flushing' = 'buffering';
+      let flushCallIndex = 0;
+      let triggeredConcurrentBuffering = false;
+      let fanoutWithReconnect: FanoutEngine;
+
+      const onEnqueueError = mock(async () => {});
+      const hooksInstance = new SafeHooks({ onEnqueueError });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      const flakyTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          if (phase === 'buffering') {
+            throw new Error('Initially down');
+          }
+          flushCallIndex++;
+          // Simulate a concurrent send() buffering more items mid-flush.
+          if (flushCallIndex === 5 && !triggeredConcurrentBuffering) {
+            triggeredConcurrentBuffering = true;
+            for (let i = 0; i < 4; i++) {
+              await fanoutWithReconnect.send(UserCreatedEvent, event);
+            }
+          }
+          throw new Error('Still down');
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      fanoutWithReconnect = new FanoutEngine({
+        transport: flakyTransport,
+        schema,
+        hooks: hooksInstance,
+        topology: testTopology,
+        defaultQueue: 'events',
+        maxRetryBufferSize: 13,
+      });
+
+      // 11 sends buffered under the cap of 13 — nothing dropped yet.
+      for (let i = 0; i < 11; i++) {
+        await fanoutWithReconnect.send(UserCreatedEvent, event);
+      }
+      expect(flakyTransport.send).toHaveBeenCalledTimes(11);
+
+      // Flush: 10 consecutive failures trip the breaker, leaving the 11th
+      // item untried. The 4 concurrently-buffered items (injected mid-pass)
+      // fill the buffer to its cap of 13 by the time the streak trips, so
+      // both the 10th flush item (existing buffer-full path) and the
+      // untried 11th item (rebufferUntried's buffer-full path) get dropped.
+      phase = 'flushing';
+      connectedCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // 11 initial + 10 flush-loop attempts + 4 injected.
+      expect(flakyTransport.send).toHaveBeenCalledTimes(11 + 10 + 4);
+      expect(onEnqueueError).toHaveBeenCalledTimes(2);
+    });
+
     it('should stop the periodic retry timer after dispose()', async () => {
       const subscriber = createSubscriber({
         name: 'handle-user',
