@@ -328,37 +328,42 @@ export class RabbitMQTransport implements Transport {
     this.subscriptionIntents.push(intent);
     await this.activateIntent(intent);
 
-    return {
-      unsubscribe: async () => {
-        intent.active = false;
+    const unsubscribe = async (): Promise<void> => {
+      intent.active = false;
 
-        const idx = this.subscriptionIntents.indexOf(intent);
-        if (idx !== -1) this.subscriptionIntents.splice(idx, 1);
+      const idx = this.subscriptionIntents.indexOf(intent);
+      if (idx !== -1) this.subscriptionIntents.splice(idx, 1);
 
-        const consumer = intent.currentConsumer;
-        if (consumer) {
-          consumer.active = false;
-          const queueChannel = this.queueChannels.get(queue);
-          if (queueChannel) {
-            try {
-              await queueChannel.channel.cancel(consumer.consumerTag);
-            } catch {
-              // Channel may already be closed
-            }
-            const cIdx = queueChannel.consumers.indexOf(consumer);
-            if (cIdx !== -1) queueChannel.consumers.splice(cIdx, 1);
-            if (queueChannel.consumers.length === 0) {
-              try {
-                await queueChannel.channel.close();
-              } catch {
-                // Ignore
-              }
-              this.queueChannels.delete(queue);
-            }
+      const consumer = intent.currentConsumer;
+      if (consumer) {
+        consumer.active = false;
+        const queueChannel = this.queueChannels.get(queue);
+        if (queueChannel) {
+          try {
+            await queueChannel.channel.cancel(consumer.consumerTag);
+          } catch {
+            // Channel may already be closed
           }
-          intent.currentConsumer = null;
+          const cIdx = queueChannel.consumers.indexOf(consumer);
+          if (cIdx !== -1) queueChannel.consumers.splice(cIdx, 1);
+          if (queueChannel.consumers.length === 0) {
+            try {
+              await queueChannel.channel.close();
+            } catch {
+              // Ignore
+            }
+            this.queueChannels.delete(queue);
+          }
         }
-      },
+        intent.currentConsumer = null;
+      }
+    };
+
+    return {
+      unsubscribe,
+      // Messages on this transport comes from outside (RabbitMQ), so, when shutting down, we need to unsubscribe directly
+      // Otherwise, we could receive traffic forever, and an idle state would never be reached.
+      pauseForShutdown: unsubscribe,
       get isActive() {
         return intent.active;
       },

@@ -770,7 +770,7 @@ describe('Matador', () => {
   });
 
   describe('self-dispatch during graceful shutdown (stopReceiving)', () => {
-    it.skip('LOCAL transport only: a self-dispatched follow-up should still be delivered after stopReceiving()', async () => {
+    it('LOCAL transport only: a self-dispatched follow-up should still be delivered after stopReceiving()', async () => {
       const topology = TopologyBuilder.create()
         .withNamespace('test')
         .addQueue('events')
@@ -832,7 +832,7 @@ describe('Matador', () => {
       expect(received).toEqual(['abc']);
     });
 
-    it.skip('MULTI transport (external primary + local fallback): a dispatched event that falls back to local should still be delivered after stopReceiving()', async () => {
+    it('MULTI transport (external primary + local fallback): a dispatched event that falls back to local should still be delivered after stopReceiving()', async () => {
       const topology = TopologyBuilder.create()
         .withNamespace('test')
         .addQueue('events')

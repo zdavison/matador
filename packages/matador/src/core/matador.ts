@@ -382,7 +382,7 @@ export class Matador implements Dispatcher {
 
   private async unsubscribeAll(): Promise<void> {
     for (const subscription of this.subscriptions) {
-      await subscription.unsubscribe();
+      await (subscription.pauseForShutdown ?? subscription.unsubscribe)();
     }
     this.subscriptions.length = 0;
   }
