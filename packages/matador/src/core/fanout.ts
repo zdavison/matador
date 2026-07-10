@@ -110,6 +110,7 @@ export class FanoutEngine {
   private readonly topology: Topology;
   private readonly defaultQueue: string;
   private enqueuingCount = 0;
+  private flushInFlightCount = 0;
   private readonly retryBuffer: BufferedSend[] = [];
   private readonly maxRetryBufferSize: number;
   private readonly maxRetryAttempts: number | undefined;
@@ -161,7 +162,7 @@ export class FanoutEngine {
    * Current count of events being enqueued.
    */
   get eventsBeingEnqueuedCount(): number {
-    return this.enqueuingCount;
+    return this.enqueuingCount + this.flushInFlightCount;
   }
 
   /**
@@ -339,30 +340,42 @@ export class FanoutEngine {
 
     // Drain the buffer atomically so concurrent flush calls don't double-send.
     const toFlush = this.retryBuffer.splice(0);
+    // Tracked separately from enqueuingCount so shutdown doesn't see a it falsely idle while items are being flushed
+    this.flushInFlightCount += toFlush.length;
     let consecutiveFailures = 0;
 
-    for (let i = 0; i < toFlush.length; i++) {
-      const item = toFlush[i];
-      if (!item) continue;
-
-      const succeeded = await this.attemptFlushItem(item);
-
-      // A success means the transport is actually working, so it resets the
-      // streak — isolated failures scattered across a healthy pass shouldn't
-      // trip the breaker, only a sustained run of them should.
-      consecutiveFailures = succeeded ? 0 : consecutiveFailures + 1;
-
-      if (consecutiveFailures >= this.maxConsecutiveFlushFailures) {
-        // A run of failures this long is more likely a systemic/connection-level
-        // issue (broker down, slow, rejecting everything) than something specific
-        // to these messages.
-        // Stopping early so that we don't retry 5k messages for nothing
-        const untried = toFlush.slice(i + 1);
-        if (untried.length > 0) {
-          await this.rebufferUntried(untried, consecutiveFailures);
+    try {
+      for (let i = 0; i < toFlush.length; i++) {
+        const item = toFlush[i];
+        if (!item) {
+          this.flushInFlightCount--;
+          continue;
         }
-        break;
+
+        const succeeded = await this.attemptFlushItem(item);
+        this.flushInFlightCount--;
+
+        // Small sleep to avoid overwhelming the transport
+        // Random sleep to avoid thundering herd (between 0 and 10ms)
+        const randomMs = Math.random() * 10;
+        await new Promise((resolve) => setTimeout(resolve, randomMs));
+
+        // A success means the transport is actually working, so it resets the consecutive failures streak
+        consecutiveFailures = succeeded ? 0 : consecutiveFailures + 1;
+
+        if (consecutiveFailures >= this.maxConsecutiveFlushFailures) {
+          // A run of failures this long is more likely a connection-level issue (broker down, slow, rejecting everything)
+          // So we stop early to avoid retrying 5k messages for nothing
+          const untried = toFlush.slice(i + 1);
+          this.flushInFlightCount -= untried.length;
+          if (untried.length > 0) {
+            await this.rebufferUntried(untried, consecutiveFailures);
+          }
+          break;
+        }
       }
+    } finally {
+      this.flushInFlightCount = 0;
     }
 
     const remaining = this.retryBuffer.length;

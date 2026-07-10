@@ -45,6 +45,21 @@ class UserCreatedEventWithMetadata extends MatadorEvent {
   }
 }
 
+/**
+ * Waits for a triggered retry-buffer flush to fully settle, including the
+ * inter-item throttle sleeps — a single macrotask tick isn't enough once the
+ * flush loop sleeps between items.
+ */
+async function waitForFlush(fanout: FanoutEngine): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (fanout.eventsBeingEnqueuedCount > 0) {
+    if (Date.now() > deadline) {
+      throw new Error('waitForFlush: timed out waiting for flush to settle');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
 const testTopology = TopologyBuilder.create()
   .withNamespace('test')
   .addQueue('events')
@@ -1547,7 +1562,7 @@ describe('FanoutEngine', () => {
       connectedCallback?.();
 
       // Give the async flush a chance to run
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       expect(transportWithReconnect.send).toHaveBeenCalledTimes(2);
     });
@@ -1591,14 +1606,14 @@ describe('FanoutEngine', () => {
 
       // Simulate reconnect — flush fails, item should be re-buffered
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       // send was attempted again during the flush
       expect(transportWithReconnect.send).toHaveBeenCalledTimes(2);
 
       // Simulate a second reconnect — should retry again
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       expect(transportWithReconnect.send).toHaveBeenCalledTimes(3);
     });
@@ -1640,7 +1655,7 @@ describe('FanoutEngine', () => {
 
       // onConnected fires — nothing buffered so flush is a no-op
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       // Only one call total (the original send — not a spurious re-send)
       expect(successTransport.send).toHaveBeenCalledTimes(1);
@@ -1730,7 +1745,7 @@ describe('FanoutEngine', () => {
         async () => 'mock',
       );
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       expect(failingTransport.send).toHaveBeenCalledTimes(2);
     });
@@ -2002,13 +2017,13 @@ describe('FanoutEngine', () => {
       // Reconnect fires while rabbit is still down — flush falls back to local
       // again and must re-buffer, not report success.
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithMulti);
       expect(onEnqueueSuccess).not.toHaveBeenCalled();
 
       // Rabbit recovers — next flush should deliver for real via rabbitmq.
       rabbitUp = true;
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithMulti);
 
       expect(onEnqueueSuccess).toHaveBeenCalledTimes(1);
       expect(onEnqueueSuccess).toHaveBeenCalledWith(
@@ -2106,13 +2121,13 @@ describe('FanoutEngine', () => {
       expect(flakyTransport.send).toHaveBeenCalledTimes(12);
 
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
       expect(flakyTransport.send).toHaveBeenCalledTimes(22);
 
       // Recovery: next flush delivers all 12 re-buffered/untried items.
       shouldFail = false;
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
       expect(flakyTransport.send).toHaveBeenCalledTimes(34);
     });
 
@@ -2159,7 +2174,7 @@ describe('FanoutEngine', () => {
       expect(flakyTransport.send).toHaveBeenCalledTimes(5);
 
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithCustomThreshold);
       expect(flakyTransport.send).toHaveBeenCalledTimes(8);
     });
 
@@ -2206,7 +2221,7 @@ describe('FanoutEngine', () => {
       expect(flakyTransport.send).toHaveBeenCalledTimes(15);
 
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithBreakerDisabled);
       expect(flakyTransport.send).toHaveBeenCalledTimes(30);
     });
 
@@ -2264,7 +2279,7 @@ describe('FanoutEngine', () => {
       // breaker (threshold 10) never trips and all 9 get attempted.
       phase = 'flushing';
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       expect(mostlyHealthyTransport.send).toHaveBeenCalledTimes(9 + 9);
       expect(onEnqueueSuccess).toHaveBeenCalledTimes(9 - 3);
@@ -2336,7 +2351,7 @@ describe('FanoutEngine', () => {
       // untried 11th item (rebufferUntried's buffer-full path) get dropped.
       phase = 'flushing';
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       // 11 initial + 10 flush-loop attempts + 4 injected.
       expect(flakyTransport.send).toHaveBeenCalledTimes(11 + 10 + 4);
@@ -2428,17 +2443,17 @@ describe('FanoutEngine', () => {
 
       // First flush fails: attempts becomes 1, still under the cap, re-buffered.
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithMaxAttempts);
       expect(onEnqueueError).not.toHaveBeenCalled();
 
       // Second flush fails: attempts becomes 2, meets the cap, dropped for good.
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithMaxAttempts);
       expect(onEnqueueError).toHaveBeenCalledTimes(1);
 
       // A further reconnect must not retry it again — it's gone.
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithMaxAttempts);
       expect(onEnqueueError).toHaveBeenCalledTimes(1);
       // 1 initial + 2 flush attempts = 3 total send() calls; no 4th.
       expect(failingTransport.send).toHaveBeenCalledTimes(3);
