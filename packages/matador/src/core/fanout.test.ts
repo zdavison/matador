@@ -3,8 +3,8 @@ import { TransportSendError } from '../errors/index.js';
 import { SafeHooks } from '../hooks/index.js';
 import type { MatadorHooks } from '../hooks/index.js';
 import { SchemaRegistry } from '../schema/index.js';
-import { TopologyBuilder } from '../topology/index.js';
-import { MultiTransport } from '../transport/index.js';
+import { TopologyBuilder, resolveTargetQueueName } from '../topology/index.js';
+import { LocalTransport, MultiTransport } from '../transport/index.js';
 import type { Transport } from '../transport/index.js';
 import {
   MatadorEvent,
@@ -42,6 +42,21 @@ class UserCreatedEventWithMetadata extends MatadorEvent {
     public override metadata?: { source: string; version: number },
   ) {
     super();
+  }
+}
+
+/**
+ * Waits for a triggered retry-buffer flush to fully settle, including the
+ * inter-item throttle sleeps — a single macrotask tick isn't enough once the
+ * flush loop sleeps between items.
+ */
+async function waitForFlush(fanout: FanoutEngine): Promise<void> {
+  const deadline = Date.now() + 1000;
+  while (fanout.eventsBeingEnqueuedCount > 0) {
+    if (Date.now() > deadline) {
+      throw new Error('waitForFlush: timed out waiting for flush to settle');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1));
   }
 }
 
@@ -1440,6 +1455,64 @@ describe('FanoutEngine', () => {
       expect(result.subscribersSent).toBe(0);
     });
 
+    it('should buffer instead of reporting success when a stub subscriber has no local subscriber', async () => {
+      // LocalTransport rejects sends to a queue with no active subscriber in
+      // this process. A stub subscriber's real implementation lives in another
+      // service, so this queue will never have one here — the send must fail
+      // and be buffered, not reported as delivered.
+      const stub = createSubscriberStub({ name: 'remote-service' });
+
+      schema.register(UserCreatedEvent, [stub]);
+
+      const onEnqueueSuccess = mock(async () => {});
+      const hooksInstance = new SafeHooks({ onEnqueueSuccess });
+
+      const localTransport = new LocalTransport();
+      await localTransport.connect();
+      await localTransport.applyTopology(testTopology);
+
+      const fanoutWithLocal = new FanoutEngine({
+        transport: localTransport,
+        schema,
+        hooks: hooksInstance,
+        topology: testTopology,
+        defaultQueue: 'events',
+        // Fast interval so the test doesn't have to wait on the 30s default
+        // to prove the message is actually held for retry, not dropped.
+        retryIntervalMs: 10,
+      });
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+      const result = await fanoutWithLocal.send(UserCreatedEvent, event);
+
+      expect(result.errors).toHaveLength(0);
+      expect(result.subscribersSent).toBe(0);
+      expect(onEnqueueSuccess).not.toHaveBeenCalled();
+
+      // The message never reached LocalTransport's own storage (enqueue()
+      // throws before storing), so it can only still exist in-memory if
+      // FanoutEngine actually buffered it. Prove that by attaching a
+      // subscriber and letting the periodic flush retry the send — if the
+      // message had been dropped instead of buffered, nothing would arrive.
+      const received: Envelope[] = [];
+      await localTransport.subscribe(
+        resolveTargetQueueName(testTopology, 'events'),
+        async (envelope) => {
+          received.push(envelope);
+        },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(received).toHaveLength(1);
+      expect(onEnqueueSuccess).toHaveBeenCalledTimes(1);
+
+      fanoutWithLocal.dispose();
+    });
+
     it('should flush buffered messages when onConnected fires', async () => {
       let connectedCallback: (() => void) | undefined;
 
@@ -1489,7 +1562,7 @@ describe('FanoutEngine', () => {
       connectedCallback?.();
 
       // Give the async flush a chance to run
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       expect(transportWithReconnect.send).toHaveBeenCalledTimes(2);
     });
@@ -1533,14 +1606,14 @@ describe('FanoutEngine', () => {
 
       // Simulate reconnect — flush fails, item should be re-buffered
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       // send was attempted again during the flush
       expect(transportWithReconnect.send).toHaveBeenCalledTimes(2);
 
       // Simulate a second reconnect — should retry again
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       expect(transportWithReconnect.send).toHaveBeenCalledTimes(3);
     });
@@ -1582,7 +1655,7 @@ describe('FanoutEngine', () => {
 
       // onConnected fires — nothing buffered so flush is a no-op
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       // Only one call total (the original send — not a spurious re-send)
       expect(successTransport.send).toHaveBeenCalledTimes(1);
@@ -1672,7 +1745,7 @@ describe('FanoutEngine', () => {
         async () => 'mock',
       );
       connectedCallback?.();
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      await waitForFlush(fanoutWithReconnect);
 
       expect(failingTransport.send).toHaveBeenCalledTimes(2);
     });
@@ -1827,6 +1900,563 @@ describe('FanoutEngine', () => {
       expect(rabbitMock.send).toHaveBeenCalledTimes(1);
       expect(localMock.send).toHaveBeenCalledTimes(1);
       expect(fanoutWithMulti.eventsBeingEnqueuedCount).toBe(0);
+    });
+
+    it('should buffer (not report success) when a real MultiTransport falls back to local for a stub subscriber', async () => {
+      const stub = createSubscriberStub({ name: 'remote-service' });
+      schema.register(UserCreatedEvent, [stub]);
+
+      const rabbitMock: Transport = {
+        ...transport,
+        name: 'rabbitmq',
+        send: mock(async () => {
+          throw new Error('RabbitMQ down');
+        }),
+      };
+      const localTransport = new LocalTransport();
+      await localTransport.connect();
+      await localTransport.applyTopology(testTopology);
+
+      const multiTransport = new MultiTransport({
+        transports: [rabbitMock, localTransport],
+      });
+
+      const onEnqueueSuccess = mock(async () => {});
+      const hooksInstance = new SafeHooks({ onEnqueueSuccess });
+
+      const fanoutWithMulti = new FanoutEngine({
+        transport: multiTransport,
+        schema,
+        hooks: hooksInstance,
+        topology: testTopology,
+        defaultQueue: 'events',
+        // Fast interval so the test doesn't have to wait on the 30s default
+        // to prove the message is actually held for retry, not dropped.
+        retryIntervalMs: 10,
+      });
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      const result = await fanoutWithMulti.send(UserCreatedEvent, event);
+
+      expect(result.subscribersSent).toBe(0);
+      expect(result.errors).toHaveLength(0);
+      expect(onEnqueueSuccess).not.toHaveBeenCalled();
+      expect(rabbitMock.send).toHaveBeenCalledTimes(1);
+
+      // Neither rabbitmq nor local ever stored the message durably (rabbit
+      // threw, local's enqueue() throws with no subscriber), so it can only
+      // still be in memory if FanoutEngine actually buffered it. Prove that
+      // by attaching a local subscriber and letting the periodic flush retry.
+      const received: Envelope[] = [];
+      await localTransport.subscribe(
+        resolveTargetQueueName(testTopology, 'events'),
+        async (envelope) => {
+          received.push(envelope);
+        },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(received).toHaveLength(1);
+      expect(onEnqueueSuccess).toHaveBeenCalledTimes(1);
+
+      fanoutWithMulti.dispose();
+    });
+
+    it('should re-buffer a stub message that falls back to local again on flush, then deliver once the primary recovers', async () => {
+      const stub = createSubscriberStub({ name: 'remote-service' });
+      schema.register(UserCreatedEvent, [stub]);
+
+      let rabbitUp = false;
+      let connectedCallback: (() => void) | undefined;
+
+      const rabbitMock: Transport = {
+        ...transport,
+        name: 'rabbitmq',
+        send: mock(async () => {
+          if (!rabbitUp) throw new Error('RabbitMQ down');
+          return 'rabbitmq';
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+      const localTransport = new LocalTransport();
+      await localTransport.connect();
+      await localTransport.applyTopology(testTopology);
+
+      const multiTransport = new MultiTransport({
+        transports: [rabbitMock, localTransport],
+      });
+
+      const onEnqueueSuccess = mock(async () => {});
+      const hooksInstance = new SafeHooks({ onEnqueueSuccess });
+
+      const fanoutWithMulti = new FanoutEngine({
+        transport: multiTransport,
+        schema,
+        hooks: hooksInstance,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      // Initial send: rabbit down, falls back to local, buffered (not delivered).
+      await fanoutWithMulti.send(UserCreatedEvent, event);
+      expect(onEnqueueSuccess).not.toHaveBeenCalled();
+
+      // Reconnect fires while rabbit is still down — flush falls back to local
+      // again and must re-buffer, not report success.
+      connectedCallback?.();
+      await waitForFlush(fanoutWithMulti);
+      expect(onEnqueueSuccess).not.toHaveBeenCalled();
+
+      // Rabbit recovers — next flush should deliver for real via rabbitmq.
+      rabbitUp = true;
+      connectedCallback?.();
+      await waitForFlush(fanoutWithMulti);
+
+      expect(onEnqueueSuccess).toHaveBeenCalledTimes(1);
+      expect(onEnqueueSuccess).toHaveBeenCalledWith(
+        expect.objectContaining({ transport: 'rabbitmq' }),
+      );
+    });
+
+    it('should retry via the periodic interval even without a reconnect event', async () => {
+      // Covers the case where the transport stays connected the whole time
+      // but an individual publish keeps failing — onConnected never fires
+      // again for that, so only the interval can recover it.
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      let shouldFail = true;
+      const flakyTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          if (shouldFail) throw new Error('Publish nacked');
+          return 'mock';
+        }),
+        // Deliberately no onConnected — the transport never disconnects.
+      };
+
+      const fanoutWithInterval = new FanoutEngine({
+        transport: flakyTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+        retryIntervalMs: 20,
+      });
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      await fanoutWithInterval.send(UserCreatedEvent, event);
+      expect(flakyTransport.send).toHaveBeenCalledTimes(1);
+
+      shouldFail = false;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(flakyTransport.send).toHaveBeenCalledTimes(2);
+
+      fanoutWithInterval.dispose();
+    });
+
+    it('should stop retrying the rest of the buffer after 10 consecutive failures in a flush pass', async () => {
+      let connectedCallback: (() => void) | undefined;
+      let shouldFail = true;
+
+      const flakyTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          if (shouldFail) throw new Error('Broker rejecting everything');
+          return 'mock';
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithReconnect = new FanoutEngine({
+        transport: flakyTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      // 12 sends buffered; flush bails after the 10th consecutive failure,
+      // leaving 2 untried.
+      for (let i = 0; i < 12; i++) {
+        await fanoutWithReconnect.send(UserCreatedEvent, event);
+      }
+      expect(flakyTransport.send).toHaveBeenCalledTimes(12);
+
+      connectedCallback?.();
+      await waitForFlush(fanoutWithReconnect);
+      expect(flakyTransport.send).toHaveBeenCalledTimes(22);
+
+      // Recovery: next flush delivers all 12 re-buffered/untried items.
+      shouldFail = false;
+      connectedCallback?.();
+      await waitForFlush(fanoutWithReconnect);
+      expect(flakyTransport.send).toHaveBeenCalledTimes(34);
+    });
+
+    it('should respect a custom maxConsecutiveFlushFailures threshold', async () => {
+      let connectedCallback: (() => void) | undefined;
+
+      const flakyTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Broker rejecting everything');
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithCustomThreshold = new FanoutEngine({
+        transport: flakyTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+        maxConsecutiveFlushFailures: 3,
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      // 5 sends buffered; flush should bail after the 3rd consecutive
+      // failure, leaving 2 untried, instead of the default threshold of 10.
+      for (let i = 0; i < 5; i++) {
+        await fanoutWithCustomThreshold.send(UserCreatedEvent, event);
+      }
+      expect(flakyTransport.send).toHaveBeenCalledTimes(5);
+
+      connectedCallback?.();
+      await waitForFlush(fanoutWithCustomThreshold);
+      expect(flakyTransport.send).toHaveBeenCalledTimes(8);
+    });
+
+    it('should never bail out of a flush pass when maxConsecutiveFlushFailures is disabled (0)', async () => {
+      let connectedCallback: (() => void) | undefined;
+
+      const flakyTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Broker rejecting everything');
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithBreakerDisabled = new FanoutEngine({
+        transport: flakyTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+        maxConsecutiveFlushFailures: 0,
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      // 15 sends buffered, well past the default breaker threshold of 10;
+      // with the breaker disabled every single one should still be attempted.
+      for (let i = 0; i < 15; i++) {
+        await fanoutWithBreakerDisabled.send(UserCreatedEvent, event);
+      }
+      expect(flakyTransport.send).toHaveBeenCalledTimes(15);
+
+      connectedCallback?.();
+      await waitForFlush(fanoutWithBreakerDisabled);
+      expect(flakyTransport.send).toHaveBeenCalledTimes(30);
+    });
+
+    it('should not trip the failure breaker on isolated failures interspersed with successes', async () => {
+      let connectedCallback: (() => void) | undefined;
+      let phase: 'buffering' | 'flushing' = 'buffering';
+      let flushCallIndex = 0;
+
+      const onEnqueueSuccess = mock(async () => {});
+      const hooksInstance = new SafeHooks({ onEnqueueSuccess });
+
+      const mostlyHealthyTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          if (phase === 'buffering') {
+            throw new Error('Initially down');
+          }
+          flushCallIndex++;
+          // Every 3rd flushed item fails — isolated, never two in a row.
+          if (flushCallIndex % 3 === 0) throw new Error('Occasional nack');
+          return 'mock';
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithReconnect = new FanoutEngine({
+        transport: mostlyHealthyTransport,
+        schema,
+        hooks: hooksInstance,
+        topology: testTopology,
+        defaultQueue: 'events',
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      for (let i = 0; i < 9; i++) {
+        await fanoutWithReconnect.send(UserCreatedEvent, event);
+      }
+      expect(mostlyHealthyTransport.send).toHaveBeenCalledTimes(9);
+
+      // Every 3rd flushed item fails, but never two in a row, so the
+      // breaker (threshold 10) never trips and all 9 get attempted.
+      phase = 'flushing';
+      connectedCallback?.();
+      await waitForFlush(fanoutWithReconnect);
+
+      expect(mostlyHealthyTransport.send).toHaveBeenCalledTimes(9 + 9);
+      expect(onEnqueueSuccess).toHaveBeenCalledTimes(9 - 3);
+    });
+
+    it('should drop untried messages that no longer fit once maxRetryBufferSize is hit by concurrent buffering', async () => {
+      let connectedCallback: (() => void) | undefined;
+      let phase: 'buffering' | 'flushing' = 'buffering';
+      let flushCallIndex = 0;
+      let triggeredConcurrentBuffering = false;
+      let fanoutWithReconnect: FanoutEngine;
+
+      const onEnqueueError = mock(async () => {});
+      const hooksInstance = new SafeHooks({ onEnqueueError });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      const flakyTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          if (phase === 'buffering') {
+            throw new Error('Initially down');
+          }
+          flushCallIndex++;
+          // Simulate a concurrent send() buffering more items mid-flush.
+          if (flushCallIndex === 5 && !triggeredConcurrentBuffering) {
+            triggeredConcurrentBuffering = true;
+            for (let i = 0; i < 4; i++) {
+              await fanoutWithReconnect.send(UserCreatedEvent, event);
+            }
+          }
+          throw new Error('Still down');
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      fanoutWithReconnect = new FanoutEngine({
+        transport: flakyTransport,
+        schema,
+        hooks: hooksInstance,
+        topology: testTopology,
+        defaultQueue: 'events',
+        maxRetryBufferSize: 13,
+      });
+
+      // 11 sends buffered under the cap of 13 — nothing dropped yet.
+      for (let i = 0; i < 11; i++) {
+        await fanoutWithReconnect.send(UserCreatedEvent, event);
+      }
+      expect(flakyTransport.send).toHaveBeenCalledTimes(11);
+
+      // Flush: 10 consecutive failures trip the breaker, leaving the 11th
+      // item untried. The 4 concurrently-buffered items (injected mid-pass)
+      // fill the buffer to its cap of 13 by the time the streak trips, so
+      // both the 10th flush item (existing buffer-full path) and the
+      // untried 11th item (rebufferUntried's buffer-full path) get dropped.
+      phase = 'flushing';
+      connectedCallback?.();
+      await waitForFlush(fanoutWithReconnect);
+
+      // 11 initial + 10 flush-loop attempts + 4 injected.
+      expect(flakyTransport.send).toHaveBeenCalledTimes(11 + 10 + 4);
+      expect(onEnqueueError).toHaveBeenCalledTimes(2);
+    });
+
+    it('should stop the periodic retry timer after dispose()', async () => {
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const failingTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Connection lost');
+        }),
+      };
+
+      const fanoutWithInterval = new FanoutEngine({
+        transport: failingTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+        retryIntervalMs: 20,
+      });
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      await fanoutWithInterval.send(UserCreatedEvent, event);
+      expect(failingTransport.send).toHaveBeenCalledTimes(1);
+
+      fanoutWithInterval.dispose();
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // No further flush attempts after dispose, despite the buffered message.
+      expect(failingTransport.send).toHaveBeenCalledTimes(1);
+    });
+
+    it('should drop a message after exceeding maxRetryAttempts instead of retrying forever', async () => {
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      let connectedCallback: (() => void) | undefined;
+      const failingTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Still down');
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const onEnqueueError = mock(async () => {});
+      const hooksInstance = new SafeHooks({
+        onEnqueueError,
+      } satisfies MatadorHooks);
+
+      const fanoutWithMaxAttempts = new FanoutEngine({
+        transport: failingTransport,
+        schema,
+        hooks: hooksInstance,
+        topology: testTopology,
+        defaultQueue: 'events',
+        maxRetryAttempts: 2,
+      });
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      // Initial send fails and buffers (attempts: 0).
+      await fanoutWithMaxAttempts.send(UserCreatedEvent, event);
+      expect(onEnqueueError).not.toHaveBeenCalled();
+
+      // First flush fails: attempts becomes 1, still under the cap, re-buffered.
+      connectedCallback?.();
+      await waitForFlush(fanoutWithMaxAttempts);
+      expect(onEnqueueError).not.toHaveBeenCalled();
+
+      // Second flush fails: attempts becomes 2, meets the cap, dropped for good.
+      connectedCallback?.();
+      await waitForFlush(fanoutWithMaxAttempts);
+      expect(onEnqueueError).toHaveBeenCalledTimes(1);
+
+      // A further reconnect must not retry it again — it's gone.
+      connectedCallback?.();
+      await waitForFlush(fanoutWithMaxAttempts);
+      expect(onEnqueueError).toHaveBeenCalledTimes(1);
+      // 1 initial + 2 flush attempts = 3 total send() calls; no 4th.
+      expect(failingTransport.send).toHaveBeenCalledTimes(3);
     });
   });
 });

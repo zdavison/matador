@@ -1,4 +1,7 @@
-import { TransportNotConnectedError } from '../../errors/index.js';
+import {
+  LocalTransportNoActiveSubscriberError,
+  TransportNotConnectedError,
+} from '../../errors/index.js';
 import { type Logger, consoleLogger } from '../../hooks/index.js';
 import type { Topology } from '../../topology/types.js';
 import { resolveQueueName } from '../../topology/types.js';
@@ -159,6 +162,23 @@ export class LocalTransport implements Transport {
   }
 
   private async enqueue(queue: string, envelope: Envelope): Promise<void> {
+    const subs = this.subscriptions.get(queue);
+    if (!subs || subs.length === 0) {
+      throw new LocalTransportNoActiveSubscriberError(queue);
+    }
+
+    await this.storeAndDeliver(queue, envelope);
+  }
+
+  /**
+   * Stores a message and delivers it to any active subscribers, without
+   * requiring one to be present. Dead-letter queues are meant to hold
+   * messages for later manual inspection, so they don't need a live consumer.
+   */
+  private async storeAndDeliver(
+    queue: string,
+    envelope: Envelope,
+  ): Promise<void> {
     const messages = this.getOrCreateQueue(queue);
     const messageId = `${++this.messageIdCounter}`;
 
@@ -170,7 +190,6 @@ export class LocalTransport implements Transport {
 
     messages.set(messageId, queuedMessage);
 
-    // Deliver to any active subscriptions
     await this.deliverToSubscribers(queue, queuedMessage);
   }
 
@@ -178,13 +197,7 @@ export class LocalTransport implements Transport {
     queue: string,
     message: QueuedMessage,
   ): Promise<void> {
-    const subs = this.subscriptions.get(queue);
-    if (!subs) {
-      this.logger.warn(
-        `[Matador][LocalTransport] 🟡 No subscriptions found for queue '${queue}', message will be lost.`,
-      );
-      return;
-    }
+    const subs = this.subscriptions.get(queue) ?? [];
 
     for (const sub of subs) {
       if (!sub.active || message.completed) continue;
@@ -274,7 +287,7 @@ export class LocalTransport implements Transport {
     _reason: string,
   ): Promise<void> {
     const dlqQueueName = `${receipt.sourceQueue}.${dlqName}`;
-    await this.enqueue(dlqQueueName, envelope);
+    await this.storeAndDeliver(dlqQueueName, envelope);
     await this.complete(receipt);
   }
 

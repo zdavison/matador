@@ -245,6 +245,18 @@ describe.each(transportFactories)(
         it('should send a message without error', async () => {
           const envelope = createTestEnvelope();
 
+          if (name === 'LocalTransport') {
+            // Unlike a real broker, LocalTransport can't durably hold a
+            // message for a consumer that doesn't exist in this process yet
+            // (there's nowhere else for it to live), so it requires an
+            // active subscriber at send time.
+            const subscription = await transport.subscribe(
+              queueName,
+              async () => {},
+            );
+            subscriptions.push(subscription);
+          }
+
           await expect(transport.send(queueName, envelope)).resolves.toBe(
             transport.name,
           );
@@ -354,7 +366,17 @@ describe.each(transportFactories)(
           await subscription.unsubscribe();
 
           // Send message after unsubscribe
-          await transport.send(queueName, createTestEnvelope());
+          if (name === 'LocalTransport') {
+            // With no subscriber left in this process, LocalTransport has
+            // nowhere to durably hold the message (unlike a real broker), so
+            // it rejects the send instead of silently accepting a message
+            // nobody will ever receive.
+            await expect(
+              transport.send(queueName, createTestEnvelope()),
+            ).rejects.toThrow();
+          } else {
+            await transport.send(queueName, createTestEnvelope());
+          }
 
           // Wait a bit to ensure no message is received
           await new Promise((resolve) => setTimeout(resolve, 500));

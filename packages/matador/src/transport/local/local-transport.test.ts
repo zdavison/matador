@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'bun:test';
+import { LocalTransportNoActiveSubscriberError } from '../../errors/index.js';
 import type { Topology } from '../../topology/types.js';
 import { createEnvelope } from '../../types/index.js';
 import { LocalTransport } from './local-transport.js';
@@ -39,6 +40,9 @@ describe('LocalTransport', () => {
   describe('send and receive', () => {
     beforeEach(async () => {
       await transport.connect();
+      // A no-op subscriber makes 'test-queue' deliverable; LocalTransport now
+      // rejects sends to queues with no active subscriber in this process.
+      await transport.subscribe('test-queue', async () => {});
     });
 
     it('should throw when sending while disconnected', async () => {
@@ -48,6 +52,14 @@ describe('LocalTransport', () => {
       await expect(transport.send('test-queue', envelope)).rejects.toThrow(
         'is not connected',
       );
+    });
+
+    it('should throw when sending to a queue with no active subscriber', async () => {
+      const envelope = createTestEnvelope();
+
+      await expect(
+        transport.send('unsubscribed-queue', envelope),
+      ).rejects.toThrow(LocalTransportNoActiveSubscriberError);
     });
 
     it('should send and receive a message', async () => {
@@ -141,16 +153,28 @@ describe('LocalTransport', () => {
       expect((receivedMessages[0] as { id: string }).id).toBe(envelope.id);
     });
 
-    it('should deliver pending messages when subscribing', async () => {
+    it('should redeliver pending (uncompleted) messages to a newly attached subscriber', async () => {
+      const firstSubscriberMessages: unknown[] = [];
+      const firstSubscription = await transport.subscribe(
+        'test-queue',
+        async (envelope) => {
+          firstSubscriberMessages.push(envelope);
+        },
+      );
+
       const envelope = createTestEnvelope();
       await transport.send('test-queue', envelope);
+      expect(firstSubscriberMessages).toHaveLength(1);
 
-      const receivedMessages: unknown[] = [];
+      // First subscriber never completed the message before going away.
+      await firstSubscription.unsubscribe();
+
+      const secondSubscriberMessages: unknown[] = [];
       await transport.subscribe('test-queue', async (env) => {
-        receivedMessages.push(env);
+        secondSubscriberMessages.push(env);
       });
 
-      expect(receivedMessages).toHaveLength(1);
+      expect(secondSubscriberMessages).toHaveLength(1);
     });
 
     it('should stop delivering after unsubscribe', async () => {
@@ -174,6 +198,7 @@ describe('LocalTransport', () => {
   describe('dead letter queue', () => {
     beforeEach(async () => {
       await transport.connect();
+      await transport.subscribe('test-queue', async () => {});
     });
 
     it('should send messages to dead letter queue', async () => {
@@ -223,6 +248,7 @@ describe('LocalTransport', () => {
   describe('clear', () => {
     it('should reset all state', async () => {
       await transport.connect();
+      await transport.subscribe('test-queue', async () => {});
       await transport.send('test-queue', createTestEnvelope());
 
       const received = await transport.receiveOne('test-queue');
@@ -239,6 +265,7 @@ describe('LocalTransport', () => {
   describe('delayed messages', () => {
     beforeEach(async () => {
       await transport.connect();
+      await transport.subscribe('test-queue', async () => {});
     });
 
     it('should return immediately and delay message delivery', async () => {
