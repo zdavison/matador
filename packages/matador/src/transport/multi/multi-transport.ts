@@ -288,6 +288,11 @@ export class MultiTransport implements Transport {
       unsubscribe: async () => {
         await Promise.all(subscriptions.map((s) => s.unsubscribe()));
       },
+      pauseForShutdown: async () => {
+        await Promise.all(
+          subscriptions.map((s) => (s.pauseForShutdown ?? s.unsubscribe)()),
+        );
+      },
       get isActive() {
         return subscriptions.some((s) => s.isActive);
       },

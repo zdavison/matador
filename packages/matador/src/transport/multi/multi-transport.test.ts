@@ -3,6 +3,7 @@ import type { TransportFallbackContext } from '../../hooks/index.js';
 import type { Topology } from '../../topology/types.js';
 import { createEnvelope } from '../../types/index.js';
 import { LocalTransport } from '../local/local-transport.js';
+import type { Transport } from '../transport.js';
 import { MultiTransport } from './multi-transport.js';
 
 describe('MultiTransport', () => {
@@ -266,6 +267,106 @@ describe('MultiTransport', () => {
       // Message went to secondary transport, subscriber should still receive it
       expect(receivedMessages).toHaveLength(1);
       expect((receivedMessages[0] as { id: string }).id).toBe(envelope.id);
+    });
+
+    it('should leave sub-transports subscribed when pauseForShutdown is a no-op', async () => {
+      const receivedMessages: unknown[] = [];
+      const subscription = await transport.subscribe(
+        'test-queue',
+        async (envelope) => {
+          receivedMessages.push(envelope);
+        },
+      );
+
+      // Both primary and secondary here are LocalTransport, whose
+      // pauseForShutdown is a no-op — pausing the aggregate must leave both
+      // underlying subscriptions untouched.
+      await subscription.pauseForShutdown?.();
+
+      await primary.send('test-queue', createTestEnvelope());
+
+      expect(receivedMessages).toHaveLength(1);
+    });
+
+    it('should call pauseForShutdown on sub-transports that implement it', async () => {
+      const externalPauseForShutdown = mock(async () => {});
+      const externalMock: Transport = {
+        name: 'rabbitmq',
+        capabilities: {
+          deliveryModes: ['at-least-once'],
+          delayedMessages: false,
+          deadLetterRouting: 'native',
+          attemptTracking: true,
+          concurrencyModel: 'prefetch',
+          ordering: 'none',
+          priorities: false,
+        },
+        isConnected: () => true,
+        connect: mock(async () => {}),
+        disconnect: mock(async () => {}),
+        send: mock(async () => 'rabbitmq'),
+        subscribe: mock(async () => ({
+          unsubscribe: mock(async () => {}),
+          pauseForShutdown: externalPauseForShutdown,
+          isActive: true,
+        })),
+        applyTopology: mock(async () => {}),
+        complete: mock(async () => {}),
+      };
+
+      const multiWithExternal = new MultiTransport({
+        transports: [externalMock, primary],
+      });
+      await multiWithExternal.connect();
+
+      const subscription = await multiWithExternal.subscribe(
+        'test-queue',
+        async () => {},
+      );
+
+      await subscription.pauseForShutdown?.();
+
+      expect(externalPauseForShutdown).toHaveBeenCalledTimes(1);
+    });
+
+    it('should fall back to unsubscribe for sub-transports without pauseForShutdown', async () => {
+      const externalUnsubscribe = mock(async () => {});
+      const externalMock: Transport = {
+        name: 'rabbitmq',
+        capabilities: {
+          deliveryModes: ['at-least-once'],
+          delayedMessages: false,
+          deadLetterRouting: 'native',
+          attemptTracking: true,
+          concurrencyModel: 'prefetch',
+          ordering: 'none',
+          priorities: false,
+        },
+        isConnected: () => true,
+        connect: mock(async () => {}),
+        disconnect: mock(async () => {}),
+        send: mock(async () => 'rabbitmq'),
+        subscribe: mock(async () => ({
+          unsubscribe: externalUnsubscribe,
+          isActive: true,
+        })),
+        applyTopology: mock(async () => {}),
+        complete: mock(async () => {}),
+      };
+
+      const multiWithExternal = new MultiTransport({
+        transports: [externalMock, primary],
+      });
+      await multiWithExternal.connect();
+
+      const subscription = await multiWithExternal.subscribe(
+        'test-queue',
+        async () => {},
+      );
+
+      await subscription.pauseForShutdown?.();
+
+      expect(externalUnsubscribe).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -122,6 +122,13 @@ export interface Subscription {
   /** Cancels the subscription */
   unsubscribe(): Promise<void>;
 
+  /**
+   * Stops delivering messages ahead of a graceful shutdown, without
+   * necessarily tearing down the subscription the way unsubscribe() does.
+   * Optional: only meaningful for externally-fed transports where traffic
+   */
+  pauseForShutdown?(): Promise<void>;
+
   /** Whether the subscription is currently active */
   readonly isActive: boolean;
 }

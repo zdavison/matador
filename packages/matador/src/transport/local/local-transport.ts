@@ -246,6 +246,10 @@ export class LocalTransport implements Transport {
           this.subscriptions.delete(queue);
         }
       },
+      // No-op: LocalTransport is only ever fed from within the process
+      // So, when shutting down, it needs to continue and handle new messages until the end
+      // As, an ongoing message (before shutdown) could create new (local) messages
+      pauseForShutdown: async () => {},
       get isActive() {
         return subscription.active;
       },
