@@ -3,7 +3,7 @@ import { TransportSendError } from '../errors/index.js';
 import { SafeHooks } from '../hooks/index.js';
 import type { MatadorHooks } from '../hooks/index.js';
 import { SchemaRegistry } from '../schema/index.js';
-import { TopologyBuilder } from '../topology/index.js';
+import { TopologyBuilder, resolveTargetQueueName } from '../topology/index.js';
 import { LocalTransport, MultiTransport } from '../transport/index.js';
 import type { Transport } from '../transport/index.js';
 import {
@@ -1462,6 +1462,9 @@ describe('FanoutEngine', () => {
         hooks: hooksInstance,
         topology: testTopology,
         defaultQueue: 'events',
+        // Fast interval so the test doesn't have to wait on the 30s default
+        // to prove the message is actually held for retry, not dropped.
+        retryIntervalMs: 10,
       });
 
       const event = new UserCreatedEvent({
@@ -1473,6 +1476,26 @@ describe('FanoutEngine', () => {
       expect(result.errors).toHaveLength(0);
       expect(result.subscribersSent).toBe(0);
       expect(onEnqueueSuccess).not.toHaveBeenCalled();
+
+      // The message never reached LocalTransport's own storage (enqueue()
+      // throws before storing), so it can only still exist in-memory if
+      // FanoutEngine actually buffered it. Prove that by attaching a
+      // subscriber and letting the periodic flush retry the send — if the
+      // message had been dropped instead of buffered, nothing would arrive.
+      const received: Envelope[] = [];
+      await localTransport.subscribe(
+        resolveTargetQueueName(testTopology, 'events'),
+        async (envelope) => {
+          received.push(envelope);
+        },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(received).toHaveLength(1);
+      expect(onEnqueueSuccess).toHaveBeenCalledTimes(1);
+
+      fanoutWithLocal.dispose();
     });
 
     it('should flush buffered messages when onConnected fires', async () => {
@@ -1892,6 +1915,9 @@ describe('FanoutEngine', () => {
         hooks: hooksInstance,
         topology: testTopology,
         defaultQueue: 'events',
+        // Fast interval so the test doesn't have to wait on the 30s default
+        // to prove the message is actually held for retry, not dropped.
+        retryIntervalMs: 10,
       });
 
       const event = new UserCreatedEvent({
@@ -1905,6 +1931,25 @@ describe('FanoutEngine', () => {
       expect(result.errors).toHaveLength(0);
       expect(onEnqueueSuccess).not.toHaveBeenCalled();
       expect(rabbitMock.send).toHaveBeenCalledTimes(1);
+
+      // Neither rabbitmq nor local ever stored the message durably (rabbit
+      // threw, local's enqueue() throws with no subscriber), so it can only
+      // still be in memory if FanoutEngine actually buffered it. Prove that
+      // by attaching a local subscriber and letting the periodic flush retry.
+      const received: Envelope[] = [];
+      await localTransport.subscribe(
+        resolveTargetQueueName(testTopology, 'events'),
+        async (envelope) => {
+          received.push(envelope);
+        },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(received).toHaveLength(1);
+      expect(onEnqueueSuccess).toHaveBeenCalledTimes(1);
+
+      fanoutWithMulti.dispose();
     });
 
     it('should re-buffer a stub message that falls back to local again on flush, then deliver once the primary recovers', async () => {
