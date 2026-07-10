@@ -422,6 +422,10 @@ When using `RabbitMQ`, `RabbitMQCodec` is used, which still uses `JSONCodec` int
 | `retryPolicy`     | No       | Custom retry policy (defaults to `StandardRetryPolicy` with 3 max attempts)                              |
 | `shutdownConfig`  | No       | Shutdown configuration (drain timeout, etc.)                                                             |
 | `checkpointStore` | No       | Checkpoint store for resumable subscribers (required for persisting `io()` results across retries)       |
+| `maxRetryBufferSize` | No    | Max in-memory buffered sends held for retry when the transport is unavailable (default `5000`)           |
+| `maxRetryAttempts` | No      | Max retry attempts for a buffered message before it's dropped (default: unlimited)                       |
+| `retryIntervalMs` | No       | How often (ms) to retry flushing the buffer, independent of reconnect events (default `30000`, `0` disables) |
+| `maxConsecutiveFlushFailures` | No | Consecutive flush failures tolerated before bailing out of a flush pass early (default `10`, `0` disables the breaker) |
 
 **Topology** is configured via `TopologyBuilder`:
 

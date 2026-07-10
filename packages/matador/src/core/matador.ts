@@ -64,6 +64,43 @@ export interface MatadorConfig {
    * won't persist across retries.
    */
   readonly checkpointStore?: CheckpointStore | undefined;
+
+  /**
+   * Maximum number of in-memory buffered sends held for retry when the
+   * transport is unavailable.
+   *
+   * @default 5000
+   */
+  readonly maxRetryBufferSize?: number | undefined;
+
+  /**
+   * Maximum number of retry attempts for a buffered message before it's
+   * dropped and reported via onEnqueueError, instead of being retried forever.
+   *
+   * @default undefined (no limit — retries until the buffer flushes successfully)
+   */
+  readonly maxRetryAttempts?: number | undefined;
+
+  /**
+   * How often (in ms) to attempt flushing the retry buffer, independent of
+   * transport reconnect events. Covers the case where the transport stays
+   * connected but an individual publish keeps failing.
+   *
+   * @default 30000. Pass 0 to disable the interval and rely on
+   * onConnected/manual flushes only.
+   */
+  readonly retryIntervalMs?: number | undefined;
+
+  /**
+   * Number of consecutive flush failures tolerated within a single flush
+   * pass before bailing out early and re-buffering the untried remainder,
+   * instead of retrying every buffered message against a broker that's
+   * rejecting everything.
+   *
+   * @default 10. Pass 0 (or a negative number) to disable the breaker and
+   * always attempt every buffered message on every flush pass.
+   */
+  readonly maxConsecutiveFlushFailures?: number | undefined;
 }
 
 /**
@@ -130,6 +167,10 @@ export class Matador implements Dispatcher {
       hooks: this.hooks,
       topology: this.topology,
       defaultQueue,
+      maxRetryBufferSize: config.maxRetryBufferSize,
+      maxRetryAttempts: config.maxRetryAttempts,
+      retryIntervalMs: config.retryIntervalMs,
+      maxConsecutiveFlushFailures: config.maxConsecutiveFlushFailures,
     });
 
     // Create shutdown manager

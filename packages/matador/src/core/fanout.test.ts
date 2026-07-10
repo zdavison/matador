@@ -2071,6 +2071,100 @@ describe('FanoutEngine', () => {
       expect(flakyTransport.send).toHaveBeenCalledTimes(34);
     });
 
+    it('should respect a custom maxConsecutiveFlushFailures threshold', async () => {
+      let connectedCallback: (() => void) | undefined;
+
+      const flakyTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Broker rejecting everything');
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithCustomThreshold = new FanoutEngine({
+        transport: flakyTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+        maxConsecutiveFlushFailures: 3,
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      // 5 sends buffered; flush should bail after the 3rd consecutive
+      // failure, leaving 2 untried, instead of the default threshold of 10.
+      for (let i = 0; i < 5; i++) {
+        await fanoutWithCustomThreshold.send(UserCreatedEvent, event);
+      }
+      expect(flakyTransport.send).toHaveBeenCalledTimes(5);
+
+      connectedCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(flakyTransport.send).toHaveBeenCalledTimes(8);
+    });
+
+    it('should never bail out of a flush pass when maxConsecutiveFlushFailures is disabled (0)', async () => {
+      let connectedCallback: (() => void) | undefined;
+
+      const flakyTransport: Transport = {
+        ...transport,
+        send: mock(async () => {
+          throw new Error('Broker rejecting everything');
+        }),
+        onConnected: (cb) => {
+          connectedCallback = cb;
+          return () => {};
+        },
+      };
+
+      const fanoutWithBreakerDisabled = new FanoutEngine({
+        transport: flakyTransport,
+        schema,
+        hooks,
+        topology: testTopology,
+        defaultQueue: 'events',
+        maxConsecutiveFlushFailures: 0,
+      });
+
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      schema.register(UserCreatedEvent, [subscriber]);
+
+      const event = new UserCreatedEvent({
+        userId: '123',
+        email: 'test@example.com',
+      });
+
+      // 15 sends buffered, well past the default breaker threshold of 10;
+      // with the breaker disabled every single one should still be attempted.
+      for (let i = 0; i < 15; i++) {
+        await fanoutWithBreakerDisabled.send(UserCreatedEvent, event);
+      }
+      expect(flakyTransport.send).toHaveBeenCalledTimes(15);
+
+      connectedCallback?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(flakyTransport.send).toHaveBeenCalledTimes(30);
+    });
+
     it('should not trip the failure breaker on isolated failures interspersed with successes', async () => {
       let connectedCallback: (() => void) | undefined;
       let phase: 'buffering' | 'flushing' = 'buffering';

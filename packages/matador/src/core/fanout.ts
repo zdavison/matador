@@ -14,10 +14,11 @@ import type {
 import { createEnvelope } from '../types/index.js';
 
 /**
- * Number of consecutive flush failures tolerated within a single flush pass
- * before bailing out early and re-buffering the untried remainder.
+ * Default number of consecutive flush failures tolerated within a single
+ * flush pass before bailing out early and re-buffering the untried
+ * remainder.
  */
-const MAX_CONSECUTIVE_FLUSH_FAILURES = 10;
+const DEFAULT_MAX_CONSECUTIVE_FLUSH_FAILURES = 10;
 
 /**
  * A send that failed (all transports exhausted) and was held in-memory for retry on reconnect.
@@ -61,6 +62,17 @@ export interface FanoutConfig {
    * onConnected/manual flushes only.
    */
   readonly retryIntervalMs?: number | undefined;
+
+  /**
+   * Number of consecutive flush failures tolerated within a single flush
+   * pass before bailing out early and re-buffering the untried remainder,
+   * instead of retrying every buffered message against a broker that's
+   * rejecting everything.
+   *
+   * @default 10. Pass 0 (or a negative number) to disable the breaker and
+   * always attempt every buffered message on every flush pass.
+   */
+  readonly maxConsecutiveFlushFailures?: number | undefined;
 }
 
 /**
@@ -101,6 +113,7 @@ export class FanoutEngine {
   private readonly retryBuffer: BufferedSend[] = [];
   private readonly maxRetryBufferSize: number;
   private readonly maxRetryAttempts: number | undefined;
+  private readonly maxConsecutiveFlushFailures: number;
   private readonly disposeOnConnected: (() => void) | undefined;
   private readonly retryTimer: ReturnType<typeof setInterval> | undefined;
 
@@ -112,6 +125,13 @@ export class FanoutEngine {
     this.defaultQueue = config.defaultQueue;
     this.maxRetryBufferSize = config.maxRetryBufferSize ?? 5000;
     this.maxRetryAttempts = config.maxRetryAttempts;
+    const maxConsecutiveFlushFailures =
+      config.maxConsecutiveFlushFailures ??
+      DEFAULT_MAX_CONSECUTIVE_FLUSH_FAILURES;
+    this.maxConsecutiveFlushFailures =
+      maxConsecutiveFlushFailures > 0
+        ? maxConsecutiveFlushFailures
+        : Number.POSITIVE_INFINITY;
 
     // If the transport supports it, add a callback to flush the retry buffer when the transport reconnects
     // The returned value is a function to unsubscribe from the callback
@@ -332,7 +352,7 @@ export class FanoutEngine {
       // trip the breaker, only a sustained run of them should.
       consecutiveFailures = succeeded ? 0 : consecutiveFailures + 1;
 
-      if (consecutiveFailures >= MAX_CONSECUTIVE_FLUSH_FAILURES) {
+      if (consecutiveFailures >= this.maxConsecutiveFlushFailures) {
         // A run of failures this long is more likely a systemic/connection-level
         // issue (broker down, slow, rejecting everything) than something specific
         // to these messages.
