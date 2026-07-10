@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { SomeSendError, TransportSendError } from '../errors/index.js';
 import type { MatadorSchema } from '../schema/index.js';
 import { TopologyBuilder } from '../topology/builder.js';
-import { LocalTransport } from '../transport/local/local-transport.js';
+import { LocalTransport, MultiTransport } from '../transport/index.js';
+import type { Transport } from '../transport/index.js';
 import { MatadorEvent, createSubscriber } from '../types/index.js';
 import { Matador } from './matador.js';
 
@@ -20,6 +21,25 @@ class OrderPlacedEvent extends MatadorEvent {
   static readonly description = 'Fired when an order is placed';
 
   constructor(public data: { orderId: string; amount: number }) {
+    super();
+  }
+}
+
+class StepOneEvent extends MatadorEvent {
+  static readonly key = 'step.one';
+  static readonly description = 'First step of a chain';
+
+  constructor(public data: { id: string }) {
+    super();
+  }
+}
+
+class StepTwoEvent extends MatadorEvent {
+  static readonly key = 'step.two';
+  static readonly description =
+    'Follow-up step dispatched from within step one';
+
+  constructor(public data: { id: string }) {
     super();
   }
 }
@@ -746,6 +766,223 @@ describe('Matador', () => {
       await matador.start();
 
       expect(matador.isConnected()).toBe(true);
+    });
+  });
+
+  describe('self-dispatch during graceful shutdown (stopReceiving)', () => {
+    it.skip('LOCAL transport only: a self-dispatched follow-up should still be delivered after stopReceiving()', async () => {
+      const topology = TopologyBuilder.create()
+        .withNamespace('test')
+        .addQueue('events')
+        .build();
+
+      const received: string[] = [];
+      let releaseGate: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let markStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+
+      const stepOneSub = createSubscriber<StepOneEvent>({
+        name: 'step-one-handler',
+        description: 'Handles step one',
+        callback: async (envelope, context) => {
+          markStarted?.();
+          await gate;
+          await context.matador.send(StepTwoEvent, { id: envelope.data.id });
+        },
+      });
+      const stepTwoSub = createSubscriber<StepTwoEvent>({
+        name: 'step-two-handler',
+        description: 'Handles step two',
+        callback: async (envelope) => {
+          received.push(envelope.data.id);
+        },
+      });
+
+      const schema: MatadorSchema = {
+        [StepOneEvent.key]: [StepOneEvent, [stepOneSub]],
+        [StepTwoEvent.key]: [StepTwoEvent, [stepTwoSub]],
+      };
+
+      matador = new Matador({
+        transport,
+        topology,
+        schema,
+        consumeFrom: ['events'],
+      });
+
+      await matador.start();
+
+      void matador.send(StepOneEvent, { id: 'abc' });
+      await started;
+
+      // Graceful shutdown begins while step-one is still in flight.
+      await matador.stopReceiving();
+
+      // The in-flight handler now self-dispatches its follow-up event.
+      releaseGate?.();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // LocalTransport is process-local — no other consumer could ever pick
+      // this up, so it should still be delivered here.
+      expect(received).toEqual(['abc']);
+    });
+
+    it.skip('MULTI transport (external primary + local fallback): a dispatched event that falls back to local should still be delivered after stopReceiving()', async () => {
+      const topology = TopologyBuilder.create()
+        .withNamespace('test')
+        .addQueue('events')
+        .build();
+
+      const received: string[] = [];
+      let releaseGate: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        releaseGate = resolve;
+      });
+      let markStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+
+      // Always-failing "external" transport, forcing every send to fall
+      // back to the local transport below.
+      const externalMock: Transport = {
+        name: 'rabbitmq',
+        capabilities: {
+          deliveryModes: ['at-least-once'],
+          delayedMessages: false,
+          deadLetterRouting: 'native',
+          attemptTracking: true,
+          concurrencyModel: 'prefetch',
+          ordering: 'none',
+          priorities: false,
+        },
+        isConnected: () => true,
+        connect: mock(async () => {}),
+        disconnect: mock(async () => {}),
+        send: mock(async () => {
+          throw new Error('RabbitMQ down');
+        }),
+        subscribe: mock(async () => ({
+          unsubscribe: mock(async () => {}),
+          isActive: true,
+        })),
+        applyTopology: mock(async () => {}),
+        complete: mock(async () => {}),
+      };
+
+      const localTransport = new LocalTransport();
+      const multiTransport = new MultiTransport({
+        transports: [externalMock, localTransport],
+      });
+
+      const stepOneSub = createSubscriber<StepOneEvent>({
+        name: 'step-one-handler',
+        description: 'Handles step one',
+        callback: async (envelope, context) => {
+          markStarted?.();
+          await gate;
+          await context.matador.send(StepTwoEvent, { id: envelope.data.id });
+        },
+      });
+      const stepTwoSub = createSubscriber<StepTwoEvent>({
+        name: 'step-two-handler',
+        description: 'Handles step two',
+        callback: async (envelope) => {
+          received.push(envelope.data.id);
+        },
+      });
+
+      const schema: MatadorSchema = {
+        [StepOneEvent.key]: [StepOneEvent, [stepOneSub]],
+        [StepTwoEvent.key]: [StepTwoEvent, [stepTwoSub]],
+      };
+
+      matador = new Matador({
+        transport: multiTransport,
+        topology,
+        schema,
+        consumeFrom: ['events'],
+      });
+
+      await matador.start();
+
+      void matador.send(StepOneEvent, { id: 'abc' });
+      await started;
+
+      await matador.stopReceiving();
+
+      releaseGate?.();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // The follow-up falls back to the local transport. Local is
+      // process-local — no other consumer could ever pick it up — so it
+      // should still be delivered here, even though the external transport's
+      // own subscription was (correctly) cut off immediately.
+      expect(received).toEqual(['abc']);
+    });
+
+    it('RABBIT-like (external) transport only: send() after stopReceiving() should still succeed regardless of local subscription state', async () => {
+      const topology = TopologyBuilder.create()
+        .withNamespace('test')
+        .addQueue('events')
+        .build();
+
+      const subscriber = createSubscriber({
+        name: 'step-one-handler',
+        description: 'Handles step one',
+        callback: async () => {},
+      });
+
+      const schema: MatadorSchema = {
+        [StepOneEvent.key]: [StepOneEvent, [subscriber]],
+      };
+
+      const externalTransport: Transport = {
+        name: 'rabbitmq',
+        capabilities: {
+          deliveryModes: ['at-least-once'],
+          delayedMessages: false,
+          deadLetterRouting: 'native',
+          attemptTracking: true,
+          concurrencyModel: 'prefetch',
+          ordering: 'none',
+          priorities: false,
+        },
+        isConnected: () => true,
+        connect: mock(async () => {}),
+        disconnect: mock(async () => {}),
+        send: mock(async () => 'rabbitmq'),
+        subscribe: mock(async () => ({
+          unsubscribe: mock(async () => {}),
+          isActive: true,
+        })),
+        applyTopology: mock(async () => {}),
+        complete: mock(async () => {}),
+      };
+
+      matador = new Matador({
+        transport: externalTransport,
+        topology,
+        schema,
+        consumeFrom: ['events'],
+      });
+
+      await matador.start();
+      await matador.stopReceiving();
+
+      const result = await matador.send(StepOneEvent, { id: 'xyz' });
+
+      // A real broker doesn't need an active local consumer to accept a
+      // publish — another replica (or this instance, once it stops
+      // pretending to be shut down) could still consume it later. This case
+      // is not part of the bug — included as a contrast baseline.
+      expect(result.subscribersSent).toBe(1);
+      expect(result.errors).toHaveLength(0);
     });
   });
 });
