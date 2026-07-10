@@ -49,8 +49,7 @@ interface ActiveSubscription {
 
 /**
  * Maximum number of completed message receipts to retain.
- * Oldest receipts are dropped once this limit is exceeded, so long-running
- * usage (e.g. as a fallback transport) doesn't grow this list forever.
+ * Oldest receipts are dropped once this limit is exceeded
  */
 const MAX_COMPLETED_MESSAGES = 1000;
 
