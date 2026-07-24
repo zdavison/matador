@@ -127,6 +127,15 @@ describe('TopologyBuilder', () => {
         'consumer timeout must be non-negative',
       );
     });
+
+    it('should allow singleActiveConsumer on its own', () => {
+      const topology = TopologyBuilder.create()
+        .withNamespace('test')
+        .addQueue('events', { singleActiveConsumer: true })
+        .build();
+
+      expect(topology.queues[0]?.singleActiveConsumer).toBe(true);
+    });
   });
 
   describe('withDeadLetter', () => {

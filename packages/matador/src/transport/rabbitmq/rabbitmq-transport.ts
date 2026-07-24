@@ -805,6 +805,10 @@ export class RabbitMQTransport implements Transport {
       queueOptions.arguments['x-consumer-timeout'] = queueDef.consumerTimeout;
     }
 
+    if (queueDef.singleActiveConsumer) {
+      queueOptions.arguments['x-single-active-consumer'] = true;
+    }
+
     return queueOptions;
   }
 

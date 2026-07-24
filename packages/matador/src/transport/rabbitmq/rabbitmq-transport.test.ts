@@ -121,6 +121,51 @@ describe('RabbitMQTransport', () => {
   });
 });
 
+describe('single active consumer', () => {
+  function createTransport() {
+    return new RabbitMQTransport({
+      url: 'amqp://localhost:5672',
+      connectionName: 'test',
+    });
+  }
+
+  function buildOptions(
+    transport: RabbitMQTransport,
+    queueDef: QueueDefinition,
+  ) {
+    const topology = TopologyBuilder.create()
+      .withNamespace('sac')
+      .addQueue(queueDef)
+      .build();
+
+    return (
+      transport as unknown as {
+        buildWorkQueueOptions(
+          topology: Topology,
+          queueDef: QueueDefinition,
+        ): { arguments: Record<string, unknown> };
+      }
+    ).buildWorkQueueOptions(topology, queueDef);
+  }
+
+  it('sets x-single-active-consumer when singleActiveConsumer is true', () => {
+    const transport = createTransport();
+    const options = buildOptions(transport, {
+      name: 'events',
+      singleActiveConsumer: true,
+    });
+
+    expect(options.arguments['x-single-active-consumer']).toBe(true);
+  });
+
+  it('omits x-single-active-consumer by default', () => {
+    const transport = createTransport();
+    const options = buildOptions(transport, { name: 'events' });
+
+    expect(options.arguments['x-single-active-consumer']).toBeUndefined();
+  });
+});
+
 describe('dead-letter and retry queue naming under withNaming', () => {
   // A v1-style naming strategy: a migrating deployment keeps Matador v1's
   // `matador.{ns}.{queue}` names so DLQ/retry resources stay identifiable.
