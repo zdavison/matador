@@ -268,6 +268,11 @@ export class Matador implements Dispatcher {
       );
     }
 
+    // Mark as started
+    // Needed for the subscribe calls below, as we might start getting messages
+    // that could send events before the code here finishes subscribing to all the queues
+    this.started = true;
+
     for (const queueName of this.consumeFrom) {
       const qualifiedName = resolveTargetQueueName(this.topology, queueName);
       const queueDef = findQueueDefinition(this.topology, queueName);
@@ -290,8 +295,6 @@ export class Matador implements Dispatcher {
 
       this.subscriptions.push(subscription);
     }
-
-    this.started = true;
   }
 
   /**
