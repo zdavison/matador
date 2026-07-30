@@ -3,8 +3,12 @@ import { SomeSendError, TransportSendError } from '../errors/index.js';
 import type { MatadorSchema } from '../schema/index.js';
 import { TopologyBuilder } from '../topology/builder.js';
 import { LocalTransport, MultiTransport } from '../transport/index.js';
-import type { Transport } from '../transport/index.js';
-import { MatadorEvent, createSubscriber } from '../types/index.js';
+import type { MessageHandler, Transport } from '../transport/index.js';
+import {
+  MatadorEvent,
+  createDummyEnvelope,
+  createSubscriber,
+} from '../types/index.js';
 import { Matador } from './matador.js';
 
 class UserCreatedEvent extends MatadorEvent {
@@ -799,6 +803,112 @@ describe('Matador', () => {
       await matador.start();
 
       expect(matador.isConnected()).toBe(true);
+    });
+  });
+
+  describe('start() race between subscribing and marking started', () => {
+    it('should allow send() from a subscriber callback fired while start() is still subscribing later queues', async () => {
+      const topology = TopologyBuilder.create()
+        .withNamespace('test')
+        .addQueue('events')
+        .addQueue('notifications')
+        .build();
+
+      let sendError: unknown;
+      const userSub = createSubscriber<UserCreatedEvent>({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async (_envelope, context) => {
+          try {
+            await context.matador.send(OrderPlacedEvent, {
+              orderId: 'order-1',
+              amount: 100,
+            });
+          } catch (err) {
+            sendError = err;
+          }
+        },
+      });
+      const orderSub = createSubscriber<OrderPlacedEvent>({
+        name: 'handle-order',
+        description: 'Handles order events',
+        callback: async () => {},
+      });
+
+      const schema: MatadorSchema = {
+        [UserCreatedEvent.key]: [UserCreatedEvent, [userSub]],
+        [OrderPlacedEvent.key]: [OrderPlacedEvent, [orderSub]],
+      };
+
+      // Simulates a broker delivering a message on the first subscribed
+      // queue before subscribe() has resolved for a later queue - the
+      // exact window in which `started` used to still be false.
+      let capturedHandler: MessageHandler | undefined;
+      let releaseSecondSubscribe: (() => void) | undefined;
+      const secondSubscribeGate = new Promise<void>((resolve) => {
+        releaseSecondSubscribe = resolve;
+      });
+
+      const raceTransport: Transport = {
+        name: 'race-transport',
+        capabilities: {
+          deliveryModes: ['at-least-once'],
+          delayedMessages: false,
+          deadLetterRouting: 'native',
+          attemptTracking: true,
+          concurrencyModel: 'prefetch',
+          ordering: 'none',
+          priorities: false,
+        },
+        isConnected: () => true,
+        connect: mock(async () => {}),
+        disconnect: mock(async () => {}),
+        send: mock(async () => 'race-transport'),
+        subscribe: mock(async (queueName: string, handler: MessageHandler) => {
+          if (queueName === 'matador.test.notifications') {
+            await secondSubscribeGate;
+          } else {
+            capturedHandler = handler;
+          }
+          return { unsubscribe: mock(async () => {}), isActive: true };
+        }),
+        applyTopology: mock(async () => {}),
+        complete: mock(async () => {}),
+      };
+
+      matador = new Matador({
+        transport: raceTransport,
+        topology,
+        schema,
+        consumeFrom: ['events', 'notifications'],
+      });
+
+      const startPromise = matador.start();
+
+      // Wait for the first queue's subscribe() to resolve and capture its
+      // handler, while the second queue's subscribe() is still pending.
+      while (!capturedHandler) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+
+      const envelope = createDummyEnvelope(
+        new UserCreatedEvent({ userId: '123', email: 'test@example.com' }),
+        { targetSubscriber: 'handle-user' },
+      );
+
+      await capturedHandler?.(envelope, {
+        handle: 'msg-1',
+        redelivered: false,
+        attemptNumber: 1,
+        deliveryCount: 1,
+        sourceQueue: 'matador.test.events',
+        sourceTransport: 'race-transport',
+      });
+
+      expect(sendError).toBeUndefined();
+
+      releaseSecondSubscribe?.();
+      await startPromise;
     });
   });
 
