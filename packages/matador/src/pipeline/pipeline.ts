@@ -346,10 +346,11 @@ export class ProcessingPipeline {
     envelope.docket.lastError = error.message;
     envelope.docket.firstError ??= error.message;
 
-    // Clear any checkpoint left over from a prior (crashed) attempt.
-    // Only on dead-letter (terminal state) - mirrors the post-execution
-    // failure path, which leaves the checkpoint intact on discard.
-    if (decision.action === 'dead-letter' && isResumableSubscriber(subscriber)) {
+    // Clear any checkpoint left over from a prior (crashed) attempt
+    if (
+      decision.action === 'dead-letter' &&
+      isResumableSubscriber(subscriber)
+    ) {
       await this.checkpointStore.delete(envelope.id);
       await this.hooks.onCheckpointCleared?.({
         envelope,
