@@ -14,7 +14,9 @@ import type {
   CallbackContext,
   Dispatcher,
   Envelope,
+  MatadorEvent,
   ResumableCallbackContext,
+  Subscriber,
   SubscriberDefinition,
 } from '../types/index.js';
 import { isResumableSubscriber } from '../types/index.js';
@@ -52,8 +54,10 @@ export interface ProcessResult {
  * Handles the complete message lifecycle:
  * 1. Decode envelope from raw bytes
  * 2. Lookup subscriber from schema
- * 3. Execute subscriber callback with hooks
- * 4. Handle success/failure with retry policy
+ * 3. Pre-execution poison check (retry policy, before running the callback)
+ * 4. Execute subscriber callback with hooks
+ * 5. Handle success
+ * 6. Handle failure with retry policy
  */
 export class ProcessingPipeline {
   private readonly transport: Transport;
@@ -157,7 +161,22 @@ export class ProcessingPipeline {
       };
     }
 
-    // 3. Execute subscriber callback with hooks
+    // 3. Pre-execution poison check, based on delivery metadata alone.
+    //
+    // Catches a message that's already known-poisoned (e.g. delivery count at/above the threshold)
+    // before running the callback
+    const precheckResult = await this.runPrecheck(
+      envelope,
+      subscriberDef,
+      subscriber,
+      receipt,
+      startTime,
+    );
+    if (precheckResult) {
+      return precheckResult;
+    }
+
+    // 4. Execute subscriber callback with hooks
     let result: unknown;
     let error: Error | undefined;
     let context: ResumableContext | undefined;
@@ -228,7 +247,7 @@ export class ProcessingPipeline {
 
     const durationMs = performance.now() - startTime;
 
-    // 4. Handle success
+    // 5. Handle success
     if (!error) {
       // Clear checkpoint on success for resumable subscribers
       if (context) {
@@ -257,7 +276,7 @@ export class ProcessingPipeline {
       };
     }
 
-    // 5. Handle failure - consult retry policy
+    // 6. Handle failure - consult retry policy
     const decision = this.retryPolicy.shouldRetry({
       envelope,
       error,
@@ -280,6 +299,68 @@ export class ProcessingPipeline {
     }
 
     await this.handleRetryDecision(receipt, envelope, decision);
+
+    await this.hooks.onWorkerError({
+      envelope,
+      subscriber: subscriberDef,
+      error,
+      durationMs,
+      decision,
+      transport: receipt.sourceTransport,
+    });
+
+    return {
+      success: false,
+      envelope,
+      subscriber: subscriberDef,
+      error,
+      decision,
+      durationMs,
+    };
+  }
+
+  /**
+   * Runs the retry policy's optional pre-execution poison check.
+   * Returns a terminal `ProcessResult` if the message should be skipped
+   * (dead-lettered/discarded) without ever invoking the callback, or
+   * `undefined` to proceed with normal processing.
+   */
+  private async runPrecheck(
+    envelope: Envelope,
+    subscriberDef: SubscriberDefinition,
+    subscriber: Subscriber<MatadorEvent<unknown>>,
+    receipt: MessageReceipt,
+    startTime: number,
+  ): Promise<ProcessResult | undefined> {
+    if (!this.retryPolicy.precheck) {
+      return undefined;
+    }
+
+    const decision = this.retryPolicy.precheck({ envelope, receipt });
+    if (!decision) {
+      return undefined;
+    }
+
+    const error = new Error(decision.reason);
+
+    envelope.docket.lastError = error.message;
+    envelope.docket.firstError ??= error.message;
+
+    // Clear any checkpoint left over from a prior (crashed) attempt.
+    // Only on dead-letter (terminal state) - mirrors the post-execution
+    // failure path, which leaves the checkpoint intact on discard.
+    if (decision.action === 'dead-letter' && isResumableSubscriber(subscriber)) {
+      await this.checkpointStore.delete(envelope.id);
+      await this.hooks.onCheckpointCleared?.({
+        envelope,
+        subscriber: subscriberDef,
+        reason: 'dead-letter',
+      });
+    }
+
+    await this.handleRetryDecision(receipt, envelope, decision);
+
+    const durationMs = performance.now() - startTime;
 
     await this.hooks.onWorkerError({
       envelope,

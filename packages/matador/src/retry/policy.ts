@@ -31,6 +31,29 @@ export type RetryDecision =
   | { readonly action: 'discard'; readonly reason: string };
 
 /**
+ * Context provided to retry policy for a pre-execution check, i.e. before the
+ * subscriber callback has run and before any error exists.
+ */
+export interface PrecheckContext {
+  /** The message envelope */
+  readonly envelope: Envelope;
+
+  /** Message receipt with delivery information */
+  readonly receipt: MessageReceipt;
+}
+
+/**
+ * Decision a pre-execution check can return. Narrower than `RetryDecision`:
+ * with no error yet and the callback not yet run, a precheck can only skip
+ * execution outright (dead-letter or discard) — never schedule a delayed
+ * first attempt.
+ */
+export type PrecheckDecision = Extract<
+  RetryDecision,
+  { action: 'dead-letter' | 'discard' }
+>;
+
+/**
  * Interface for retry policies.
  */
 export interface RetryPolicy {
@@ -43,4 +66,18 @@ export interface RetryPolicy {
    * Calculates the delay for a retry attempt.
    */
   getDelay(context: RetryContext): number;
+
+  /**
+   * Optional pre-execution check, run before the subscriber callback is
+   * invoked, based on delivery metadata alone.
+   *
+   * This lets a policy dead-letter a message that's already known-poisoned
+   * (e.g. delivery count at/above the configured threshold) without running
+   * the callback again.
+   *
+   * This can happen when a poisoned message makes the worker to crash mid-process
+   *
+   * Return `undefined` to proceed with normal processing.
+   */
+  precheck?(context: PrecheckContext): PrecheckDecision | undefined;
 }
