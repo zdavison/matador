@@ -68,16 +68,11 @@ export interface RetryPolicy {
   getDelay(context: RetryContext): number;
 
   /**
-   * Optional pre-execution check, run before the subscriber callback is
-   * invoked, based on delivery metadata alone.
+   * Optional pre-execution check
+   * It runs before the subscriber callback is invoked, based on delivery metadata alone.
+   * It is used to determine if the message is poisoned and should be dead-lettered or discarded.
    *
-   * This lets a policy dead-letter a message that's already known-poisoned
-   * (e.g. delivery count at/above the configured threshold) without running
-   * the callback again.
-   *
-   * This can happen when a poisoned message makes the worker to crash mid-process
-   *
-   * Return `undefined` to proceed with normal processing.
+   * Return `undefined` to proceed with normal processing, otherwise return a decision to handle the message accordingly.
    */
   precheck?(context: PrecheckContext): PrecheckDecision | undefined;
 }

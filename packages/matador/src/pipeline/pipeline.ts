@@ -321,9 +321,12 @@ export class ProcessingPipeline {
 
   /**
    * Runs the retry policy's optional pre-execution poison check.
-   * Returns a terminal `ProcessResult` if the message should be skipped
-   * (dead-lettered/discarded) without ever invoking the callback, or
-   * `undefined` to proceed with normal processing.
+   * @param envelope - The message envelope
+   * @param subscriberDef - The subscriber definition
+   * @param subscriber - The subscriber
+   * @param receipt - The message receipt
+   * @param startTime - The start time of the processing
+   * @returns A terminal `ProcessResult` if the message should be skipped (dead-lettered/discarded) without ever invoking the callback, or `undefined` to proceed with normal processing.
    */
   private async runPrecheck(
     envelope: Envelope,
@@ -337,9 +340,13 @@ export class ProcessingPipeline {
     }
 
     const decision = this.retryPolicy.precheck({ envelope, receipt });
-    if (!decision) {
+
+    // If no decision, the message is not poisoned and we can proceed with normal processing
+   if (!decision) {
       return undefined;
     }
+
+    // If a decision is returned, the message is poisoned and we need to handle it accordingly
 
     const error = new Error(decision.reason);
 
