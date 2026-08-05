@@ -342,7 +342,7 @@ export class ProcessingPipeline {
     const decision = this.retryPolicy.precheck({ envelope, receipt });
 
     // If no decision, the message is not poisoned and we can proceed with normal processing
-   if (!decision) {
+    if (!decision) {
       return undefined;
     }
 
