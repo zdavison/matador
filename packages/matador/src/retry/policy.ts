@@ -58,6 +58,13 @@ export type PrecheckDecision = Extract<
  */
 export interface RetryPolicy {
   /**
+   * Check if the message should be dead-lettered or discarded before the subscriber callback is invoked
+   *
+   * Return `undefined` to proceed with normal processing, otherwise return a decision to handle the message accordingly.
+   */
+  precheck(context: PrecheckContext): PrecheckDecision | undefined;
+
+  /**
    * Determines what to do with a failed message.
    */
   shouldRetry(context: RetryContext): RetryDecision;
@@ -66,13 +73,4 @@ export interface RetryPolicy {
    * Calculates the delay for a retry attempt.
    */
   getDelay(context: RetryContext): number;
-
-  /**
-   * Optional pre-execution check
-   * It runs before the subscriber callback is invoked, based on delivery metadata alone.
-   * It is used to determine if the message is poisoned and should be dead-lettered or discarded.
-   *
-   * Return `undefined` to proceed with normal processing, otherwise return a decision to handle the message accordingly.
-   */
-  precheck?(context: PrecheckContext): PrecheckDecision | undefined;
 }

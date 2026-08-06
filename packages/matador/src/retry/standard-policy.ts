@@ -71,9 +71,7 @@ export class StandardRetryPolicy implements RetryPolicy {
   }
 
   /**
-   * Pre-execution poison check
-   * It runs before the subscriber callback is invoked, based on delivery metadata alone.
-   * It is used to determine if the message is poisoned and should be dead-lettered or discarded.
+   * Check if the message should be dead-lettered or discarded before the subscriber callback is invoked
    *
    * Uses the same delivery-count threshold as `shouldRetry`'s
    * poison check, so an already-poisoned message is dead-lettered without ever running the callback again.
