@@ -136,12 +136,13 @@ export interface QueueDefinition {
   /**
    * Restricts the queue to one active consumer at a time.
    *
-   * Only RabbitMQ supports this, via its `x-single-active-consumer` argument.
-   * Other transports ignore it. RabbitMQ also ignores it when the queue sets a
-   * custom `transport.rabbitmq.options` override.
+   * Only RabbitMQ supports this option, with the `x-single-active-consumer`
+   * argument. Other transports ignore the option. RabbitMQ also ignores the
+   * option when you set a custom `transport.rabbitmq.options` override on the
+   * queue.
    *
-   * With `concurrency: 1`, the queue is delivered in order, one message at a
-   * time, to whichever consumer is active.
+   * With `concurrency: 1`, RabbitMQ delivers the queue in order, one message
+   * at a time, to the active consumer.
    *
    * @default false
    */
