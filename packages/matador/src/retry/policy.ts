@@ -31,6 +31,20 @@ export type RetryDecision =
   | { readonly action: 'discard'; readonly reason: string };
 
 /**
+ * Decision for a poisoned message
+ */
+export type PoisonedMessageDecision =
+  | { action: 'not-poisoned' }
+  | Extract<RetryDecision, { action: 'dead-letter' | 'discard' }>;
+
+/**
+ * Decision a pre-execution check can return
+ */
+export type PrecheckDecision =
+  | { action: 'pass' }
+  | Extract<RetryDecision, { action: 'dead-letter' | 'discard' }>;
+
+/**
  * Context provided to retry policy for a pre-execution check, i.e. before the
  * subscriber callback has run and before any error exists.
  */
@@ -43,26 +57,15 @@ export interface PrecheckContext {
 }
 
 /**
- * Decision a pre-execution check can return. Narrower than `RetryDecision`:
- * with no error yet and the callback not yet run, a precheck can only skip
- * execution outright (dead-letter or discard) — never schedule a delayed
- * first attempt.
- */
-export type PrecheckDecision = Extract<
-  RetryDecision,
-  { action: 'dead-letter' | 'discard' }
->;
-
-/**
  * Interface for retry policies.
  */
 export interface RetryPolicy {
   /**
    * Check if the message should be dead-lettered or discarded before the subscriber callback is invoked
    *
-   * Return `undefined` to proceed with normal processing, otherwise return a decision to handle the message accordingly.
+   * Return a 'pass' decision to proceed with normal processing, otherwise return a decision to handle the message accordingly (e.g. dead-letter or discard).
    */
-  precheck(context: PrecheckContext): PrecheckDecision | undefined;
+  precheck(context: PrecheckContext): PrecheckDecision;
 
   /**
    * Determines what to do with a failed message.

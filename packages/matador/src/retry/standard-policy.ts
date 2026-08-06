@@ -8,6 +8,7 @@ import {
 import type { MessageReceipt } from '../transport/index.js';
 import type { Envelope } from '../types/index.js';
 import type {
+  PoisonedMessageDecision,
   PrecheckContext,
   PrecheckDecision,
   RetryContext,
@@ -77,10 +78,11 @@ export class StandardRetryPolicy implements RetryPolicy {
    * poison check, so an already-poisoned message is dead-lettered without ever running the callback again.
    *
    * @param context - The precheck context.
-   * @returns The precheck decision.
+   * @returns A 'pass' decision if the message is not poisoned, a poison decision otherwise.
    */
-  precheck(context: PrecheckContext): PrecheckDecision | undefined {
-    return this.checkPoisoned(context.envelope, context.receipt);
+  precheck(context: PrecheckContext): PrecheckDecision {
+    const decision = this.checkPoisoned(context.envelope, context.receipt);
+    return decision.action === 'not-poisoned' ? { action: 'pass' } : decision;
   }
 
   shouldRetry(context: RetryContext): RetryDecision {
@@ -89,7 +91,9 @@ export class StandardRetryPolicy implements RetryPolicy {
 
     // 1. Poison message detection - prevent crash loops
     const poisonDecision = this.checkPoisoned(envelope, receipt);
-    if (poisonDecision) {
+
+    // If the message is poisoned, return the poison decision
+    if (poisonDecision.action !== 'not-poisoned') {
       return poisonDecision;
     }
 
@@ -167,15 +171,16 @@ export class StandardRetryPolicy implements RetryPolicy {
   }
 
   /**
-   * Checks the native delivery count against the poison threshold.
-   * Returns a dead-letter decision if the message is poisoned, undefined
-   * otherwise. Shared by both `precheck` (before execution) and
-   * `shouldRetry` (after a failed execution).
+   * Checks the native delivery count against the poison threshold
+   *
+   * @param envelope - The message envelope.
+   * @param receipt - The message receipt.
+   * @returns A dead-letter decision if the message is poisoned, a not-poisoned decision otherwise.
    */
   private checkPoisoned(
     envelope: Envelope,
     receipt: MessageReceipt,
-  ): PrecheckDecision | undefined {
+  ): PoisonedMessageDecision {
     if (receipt.deliveryCount >= this.config.maxDeliveries) {
       const poisonError = new MessageMaybePoisonedError(
         envelope.id,
@@ -188,6 +193,6 @@ export class StandardRetryPolicy implements RetryPolicy {
         reason: poisonError.message,
       };
     }
-    return undefined;
+    return { action: 'not-poisoned' };
   }
 }

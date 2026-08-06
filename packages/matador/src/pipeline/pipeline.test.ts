@@ -1053,7 +1053,9 @@ describe('ProcessingPipeline', () => {
     it('should call retryPolicy.precheck before invoking the callback', async () => {
       const envelope = createTestEnvelope();
       const callbackMock = mock(async () => {});
-      const precheckMock = mock(() => undefined);
+      const precheckMock = mock(
+        (): PrecheckDecision => ({ action: 'pass' as const }),
+      );
 
       const config = createMockConfig({
         codec: {
@@ -1154,39 +1156,6 @@ describe('ProcessingPipeline', () => {
       expect(result.decision).toEqual(
         expect.objectContaining({ action: 'dead-letter' }),
       );
-    });
-
-    it('should proceed with normal processing when the policy has no precheck method', async () => {
-      const envelope = createTestEnvelope();
-      const callbackMock = mock(async () => {});
-
-      const config = createMockConfig({
-        codec: {
-          decode: mock(() => envelope),
-        },
-        schema: {
-          getSubscriberDefinition: mock(() => createSubscriberDefinition()),
-          getExecutableSubscriber: mock(() => ({
-            name: 'test-subscriber',
-            description: 'Test subscriber',
-            idempotent: 'unknown' as const,
-            callback: callbackMock,
-          })),
-        },
-        retryPolicy: {
-          shouldRetry: mock(
-            (): RetryDecision => ({ action: 'discard' as const, reason: '' }),
-          ),
-          getDelay: mock(() => 1000),
-        },
-      });
-
-      const pipeline = new ProcessingPipeline(config);
-      const receipt = createReceipt();
-
-      await pipeline.process(new Uint8Array(), receipt);
-
-      expect(callbackMock).toHaveBeenCalled();
     });
 
     it('should clear the checkpoint before dead-lettering a poisoned resumable subscriber', async () => {
@@ -1499,6 +1468,11 @@ function createMockConfig(
   )
     ? overrides.retryPolicy
     : {
+        precheck: mock(
+          (): PrecheckDecision => ({
+            action: 'pass' as const,
+          }),
+        ),
         shouldRetry: mock(
           (): RetryDecision => ({
             action: 'discard' as const,

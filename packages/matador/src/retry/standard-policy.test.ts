@@ -186,7 +186,7 @@ describe('StandardRetryPolicy', () => {
   });
 
   describe('precheck', () => {
-    it('should return undefined when delivery count is under the threshold', () => {
+    it('should return pass when delivery count is under the threshold', () => {
       const policy = new StandardRetryPolicy({ maxDeliveries: 5 });
       const { envelope, receipt } = createPrecheckContext({
         deliveryCount: 4,
@@ -194,7 +194,7 @@ describe('StandardRetryPolicy', () => {
 
       const decision = policy.precheck({ envelope, receipt });
 
-      expect(decision).toBeUndefined();
+      expect(decision.action).toBe('pass');
     });
 
     it('should dead-letter when delivery count is at/above the threshold, without an error', () => {
@@ -205,8 +205,7 @@ describe('StandardRetryPolicy', () => {
 
       const decision = policy.precheck({ envelope, receipt });
 
-      expect(decision).toBeDefined();
-      if (!decision) throw new Error('expected a decision');
+      expect(decision.action).toBe('dead-letter');
       if (decision.action !== 'dead-letter') {
         throw new Error(`Expected dead-letter action, got ${decision.action}`);
       }
