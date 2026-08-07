@@ -5,7 +5,15 @@ import {
   isDoRetry,
   isDontRetry,
 } from '../errors/index.js';
-import type { RetryContext, RetryDecision, RetryPolicy } from './policy.js';
+import type { MessageReceipt } from '../transport/index.js';
+import type { Envelope } from '../types/index.js';
+import type {
+  ProcessContext,
+  ProcessDecision,
+  RetryContext,
+  RetryDecision,
+  RetryPolicy,
+} from './policy.js';
 
 /**
  * Configuration for the standard retry policy.
@@ -62,17 +70,41 @@ export class StandardRetryPolicy implements RetryPolicy {
     this.config = { ...defaultRetryConfig, ...config };
   }
 
+  /**
+   * Check if the message should be dead-lettered before the subscriber callback is invoked
+   *
+   * Uses the same delivery-count threshold as `shouldRetry` poison check, so an
+   * already-poisoned message is dead-lettered without ever running the callback again.
+   *
+   * @param context - The shouldProcess context.
+   * @returns A 'process' decision if the message is not poisoned; a dead-letter decision otherwise.
+   */
+  shouldProcess(context: ProcessContext): ProcessDecision {
+    // Poison message detection - prevent crash loops
+    const poisonError = this.checkPoisoned(context.envelope, context.receipt);
+
+    // If the message is poisoned, dead-letter it
+    if (poisonError) {
+      return {
+        action: 'dead-letter',
+        queue: 'undeliverable',
+        reason: poisonError.message,
+      };
+    }
+
+    // Allow processing to continue
+    return { action: 'process' };
+  }
+
   shouldRetry(context: RetryContext): RetryDecision {
     const { envelope, error, subscriber, receipt } = context;
     const errorMessage = error.message;
 
     // 1. Poison message detection - prevent crash loops
-    if (receipt.deliveryCount >= this.config.maxDeliveries) {
-      const poisonError = new MessageMaybePoisonedError(
-        envelope.id,
-        receipt.deliveryCount,
-        this.config.maxDeliveries,
-      );
+    const poisonError = this.checkPoisoned(envelope, receipt);
+
+    // If the message is poisoned, dead-letter it
+    if (poisonError) {
       return {
         action: 'dead-letter',
         queue: 'undeliverable',
@@ -151,5 +183,26 @@ export class StandardRetryPolicy implements RetryPolicy {
     const delay =
       this.config.baseDelay * this.config.backoffMultiplier ** (attempt - 1);
     return Math.min(delay, this.config.maxDelay);
+  }
+
+  /**
+   * Checks the native delivery count against the poison threshold
+   *
+   * @param envelope - The message envelope.
+   * @param receipt - The message receipt.
+   * @returns A MessageMaybePoisonedError if the message is poisoned; null otherwise
+   */
+  private checkPoisoned(
+    envelope: Envelope,
+    receipt: MessageReceipt,
+  ): MessageMaybePoisonedError | null {
+    if (receipt.deliveryCount >= this.config.maxDeliveries) {
+      return new MessageMaybePoisonedError(
+        envelope.id,
+        receipt.deliveryCount,
+        this.config.maxDeliveries,
+      );
+    }
+    return null;
   }
 }

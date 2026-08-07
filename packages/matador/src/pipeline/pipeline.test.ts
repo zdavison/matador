@@ -6,7 +6,11 @@ import {
   SubscriberNotRegisteredError,
 } from '../errors/index.js';
 import type { SafeHooks } from '../hooks/index.js';
-import type { RetryDecision, RetryPolicy } from '../retry/index.js';
+import type {
+  ProcessDecision,
+  RetryDecision,
+  RetryPolicy,
+} from '../retry/index.js';
 import { StandardRetryPolicy } from '../retry/index.js';
 import type { SchemaRegistry } from '../schema/index.js';
 import type { MessageReceipt, Transport } from '../transport/index.js';
@@ -1045,6 +1049,166 @@ describe('ProcessingPipeline', () => {
     });
   });
 
+  describe('pre-execution poison check', () => {
+    it('should call retryPolicy.shouldProcess before invoking the callback', async () => {
+      const envelope = createTestEnvelope();
+      const callbackMock = mock(async () => {});
+      const shouldProcessMock = mock(
+        (): ProcessDecision => ({ action: 'process' as const }),
+      );
+
+      const config = createMockConfig({
+        codec: {
+          decode: mock(() => envelope),
+        },
+        schema: {
+          getSubscriberDefinition: mock(() => createSubscriberDefinition()),
+          getExecutableSubscriber: mock(() => ({
+            name: 'test-subscriber',
+            description: 'Test subscriber',
+            idempotent: 'unknown' as const,
+            callback: callbackMock,
+          })),
+        },
+        retryPolicy: {
+          shouldRetry: mock(
+            (): RetryDecision => ({ action: 'discard' as const, reason: '' }),
+          ),
+          getDelay: mock(() => 1000),
+          shouldProcess: shouldProcessMock,
+        },
+      });
+
+      const pipeline = new ProcessingPipeline(config);
+      const receipt = createReceipt({ deliveryCount: 1 });
+
+      await pipeline.process(new Uint8Array(), receipt);
+
+      expect(shouldProcessMock).toHaveBeenCalledWith({ envelope, receipt });
+      expect(callbackMock).toHaveBeenCalled();
+    });
+
+    it('should dead-letter without invoking the callback when shouldProcess flags the message as poisoned', async () => {
+      const envelope = createTestEnvelope();
+      const callbackMock = mock(async () => {});
+      const sendToDeadLetterMock = mock(async () => {});
+      const onWorkerErrorMock = mock(async () => {});
+
+      const config = createMockConfig({
+        codec: {
+          decode: mock(() => envelope),
+        },
+        schema: {
+          getSubscriberDefinition: mock(() => createSubscriberDefinition()),
+          getExecutableSubscriber: mock(() => ({
+            name: 'test-subscriber',
+            description: 'Test subscriber',
+            idempotent: 'unknown' as const,
+            callback: callbackMock,
+          })),
+        },
+        retryPolicy: {
+          shouldRetry: mock(
+            (): RetryDecision => ({ action: 'discard' as const, reason: '' }),
+          ),
+          getDelay: mock(() => 1000),
+          shouldProcess: mock(
+            (): ProcessDecision => ({
+              action: 'dead-letter' as const,
+              queue: 'undeliverable',
+              reason:
+                'Message delivered 5 times (max: 5). Possible poison message.',
+            }),
+          ),
+        },
+        transport: {
+          sendToDeadLetter: sendToDeadLetterMock,
+        },
+        hooks: {
+          onWorkerError: onWorkerErrorMock,
+        },
+      });
+
+      const pipeline = new ProcessingPipeline(config);
+      const receipt = createReceipt({ deliveryCount: 5 });
+
+      const result = await pipeline.process(new Uint8Array(), receipt);
+
+      // The callback must never run for an already-poisoned message.
+      expect(callbackMock).not.toHaveBeenCalled();
+
+      expect(sendToDeadLetterMock).toHaveBeenCalledWith(
+        receipt,
+        'undeliverable',
+        expect.objectContaining({ id: envelope.id }),
+        expect.stringContaining('Possible poison message'),
+      );
+
+      expect(onWorkerErrorMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          envelope,
+          error: expect.any(Error),
+          decision: expect.objectContaining({ action: 'dead-letter' }),
+        }),
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.decision).toEqual(
+        expect.objectContaining({ action: 'dead-letter' }),
+      );
+    });
+
+    it('should clear the checkpoint before dead-lettering a poisoned resumable subscriber', async () => {
+      const envelope = createTestEnvelope();
+      const callbackMock = mock(async () => {});
+      const deleteMock = mock(async () => {});
+
+      const config = createMockConfig({
+        codec: {
+          decode: mock(() => envelope),
+        },
+        schema: {
+          getSubscriberDefinition: mock(() => createSubscriberDefinition()),
+          getExecutableSubscriber: mock(() => ({
+            name: 'test-subscriber',
+            description: 'Test subscriber',
+            idempotent: 'resumable' as const,
+            callback: callbackMock,
+          })),
+        },
+        retryPolicy: {
+          shouldRetry: mock(
+            (): RetryDecision => ({ action: 'discard' as const, reason: '' }),
+          ),
+          getDelay: mock(() => 1000),
+          shouldProcess: mock(
+            (): ProcessDecision => ({
+              action: 'dead-letter' as const,
+              queue: 'undeliverable',
+              reason: 'poisoned',
+            }),
+          ),
+        },
+      });
+      const pipelineConfig = {
+        ...config,
+        checkpointStore: {
+          get: mock(async () => undefined),
+          set: mock(async () => {}),
+          delete: deleteMock,
+        },
+      };
+
+      const pipeline = new ProcessingPipeline(pipelineConfig);
+      const receipt = createReceipt({ deliveryCount: 5 });
+
+      await pipeline.process(new Uint8Array(), receipt);
+
+      expect(callbackMock).not.toHaveBeenCalled();
+      expect(deleteMock).toHaveBeenCalledWith(envelope.id);
+    });
+  });
+
   describe('process result', () => {
     it('should return success result with duration', async () => {
       const envelope = createTestEnvelope();
@@ -1304,6 +1468,11 @@ function createMockConfig(
   )
     ? overrides.retryPolicy
     : {
+        shouldProcess: mock(
+          (): ProcessDecision => ({
+            action: 'process' as const,
+          }),
+        ),
         shouldRetry: mock(
           (): RetryDecision => ({
             action: 'discard' as const,

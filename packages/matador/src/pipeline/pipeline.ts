@@ -52,8 +52,10 @@ export interface ProcessResult {
  * Handles the complete message lifecycle:
  * 1. Decode envelope from raw bytes
  * 2. Lookup subscriber from schema
- * 3. Execute subscriber callback with hooks
- * 4. Handle success/failure with retry policy
+ * 3. Pre-execution poison check (retry policy, before running the callback)
+ * 4. Execute subscriber callback with hooks
+ * 5. Handle success
+ * 6. Handle failure with retry policy
  */
 export class ProcessingPipeline {
   private readonly transport: Transport;
@@ -157,15 +159,31 @@ export class ProcessingPipeline {
       };
     }
 
-    // 3. Execute subscriber callback with hooks
+    const isResumable = isResumableSubscriber(subscriber);
+
+    // 3. Pre-execution poison check, based on delivery metadata alone.
+    //
+    // Catches a message that's already known-poisoned (e.g. delivery count at/above the threshold)
+    // before running the callback
+    const shouldProcessResult = await this.handleShouldProcess(
+      envelope,
+      subscriberDef,
+      isResumable,
+      receipt,
+      startTime,
+    );
+    // If the message is poisoned, return the result immediately
+    if (!shouldProcessResult.success) {
+      return shouldProcessResult;
+    }
+
+    // 4. Execute subscriber callback with hooks
     let result: unknown;
     let error: Error | undefined;
     let context: ResumableContext | undefined;
-
-    // For resumable subscribers, load existing checkpoint and create context
-    const isResumable = isResumableSubscriber(subscriber);
     let existingCheckpoint: Checkpoint | undefined;
 
+    // For resumable subscribers, load existing checkpoint and create context
     if (isResumable) {
       existingCheckpoint = await this.checkpointStore.get(envelope.id);
 
@@ -228,7 +246,7 @@ export class ProcessingPipeline {
 
     const durationMs = performance.now() - startTime;
 
-    // 4. Handle success
+    // 5. Handle success
     if (!error) {
       // Clear checkpoint on success for resumable subscribers
       if (context) {
@@ -257,7 +275,7 @@ export class ProcessingPipeline {
       };
     }
 
-    // 5. Handle failure - consult retry policy
+    // 6. Handle failure - consult retry policy
     const decision = this.retryPolicy.shouldRetry({
       envelope,
       error,
@@ -265,13 +283,90 @@ export class ProcessingPipeline {
       receipt,
     });
 
+    return await this.handleFailure(
+      error,
+      decision,
+      envelope,
+      subscriberDef,
+      isResumable,
+      receipt,
+      durationMs,
+    );
+  }
+
+  /**
+   * Runs the retry policy's pre-processing check.
+   *
+   * This returns a terminal `ProcessResult` if the message should be skipped (dead-lettered/discarded) without ever invoking the callback,
+   * or a success result if shouldProcess passes and we should continue processing the message.
+   * @param envelope - The message envelope
+   * @param subscriberDef - The subscriber definition
+   * @param isResumable - Whether the subscriber is resumable
+   * @param receipt - The message receipt
+   * @param startTime - The start time of the processing
+   * @returns A `ProcessResult` indicating if we should continue with processing the message, or fail it preemptively
+   */
+  private async handleShouldProcess(
+    envelope: Envelope,
+    subscriberDef: SubscriberDefinition,
+    isResumable: boolean,
+    receipt: MessageReceipt,
+    startTime: number,
+  ): Promise<ProcessResult> {
+    const decision = this.retryPolicy.shouldProcess({ envelope, receipt });
+
+    // If shouldProcess passes, we can proceed with normal processing
+    if (decision.action === 'process') {
+      return {
+        success: true,
+        durationMs: 0,
+      };
+    }
+
+    // Otherwise, the message needs to be handled accordingly (e.g. dead-lettered or discarded)
+
+    const durationMs = performance.now() - startTime;
+    const error = new Error(decision.reason);
+
+    return await this.handleFailure(
+      error,
+      decision,
+      envelope,
+      subscriberDef,
+      isResumable,
+      receipt,
+      durationMs,
+    );
+  }
+
+  /**
+   * Performs failure handling and cleanup based on retry decision (e.g. dead-letter).
+   *
+   * @param error - The error from the processing attempt
+   * @param decision - The decision from executing the appropriate retry policy check
+   * @param envelope - The message envelope
+   * @param subscriberDef - The subscriber definition
+   * @param isResumable - Whether the subscriber is resumable
+   * @param receipt - The message receipt
+   * @param durationMs - The duration of processing
+   * @returns A `ProcessResult` indicating failure
+   */
+  private async handleFailure(
+    error: Error,
+    decision: RetryDecision,
+    envelope: Envelope,
+    subscriberDef: SubscriberDefinition,
+    isResumable: boolean,
+    receipt: MessageReceipt,
+    durationMs: number,
+  ): Promise<ProcessResult> {
     // Update envelope with error info
     envelope.docket.lastError = error.message;
     envelope.docket.firstError ??= error.message;
 
     // Clear checkpoint on dead-letter (terminal state)
-    if (decision.action === 'dead-letter' && context) {
-      await context.clear();
+    if (decision.action === 'dead-letter' && isResumable) {
+      await this.checkpointStore.delete(envelope.id);
       await this.hooks.onCheckpointCleared?.({
         envelope,
         subscriber: subscriberDef,
