@@ -306,7 +306,7 @@ export class ProcessingPipeline {
    * @param isResumable - Whether the subscriber is resumable
    * @param receipt - The message receipt
    * @param startTime - The start time of the processing
-   * @returns A `ProcessResult` indicating if we should continue or processing the message, or failure
+   * @returns A `ProcessResult` indicating if we should continue with processing the message, or fail it preemptively
    */
   private async handleShouldProcess(
     envelope: Envelope,
