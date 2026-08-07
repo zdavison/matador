@@ -220,13 +220,13 @@ describe('StandardRetryPolicy', () => {
       const receiptOverrides = { attemptNumber: 1, deliveryCount: 5 };
       const context = createContext(new Error('Some error'), receiptOverrides);
 
-      const ProcessDecision = policy.shouldProcess({
+      const processDecision = policy.shouldProcess({
         envelope: context.envelope,
         receipt: context.receipt,
       });
       const shouldRetryDecision = policy.shouldRetry(context);
 
-      expect(ProcessDecision as RetryDecision).toEqual(shouldRetryDecision);
+      expect(processDecision as RetryDecision).toEqual(shouldRetryDecision);
     });
   });
 
