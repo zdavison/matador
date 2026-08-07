@@ -7,7 +7,7 @@ import {
 } from '../errors/index.js';
 import type { SafeHooks } from '../hooks/index.js';
 import type {
-  PrecheckDecision,
+  ProcessDecision,
   RetryDecision,
   RetryPolicy,
 } from '../retry/index.js';
@@ -1050,11 +1050,11 @@ describe('ProcessingPipeline', () => {
   });
 
   describe('pre-execution poison check', () => {
-    it('should call retryPolicy.precheck before invoking the callback', async () => {
+    it('should call retryPolicy.shouldProcess before invoking the callback', async () => {
       const envelope = createTestEnvelope();
       const callbackMock = mock(async () => {});
-      const precheckMock = mock(
-        (): PrecheckDecision => ({ action: 'pass' as const }),
+      const shouldProcessMock = mock(
+        (): ProcessDecision => ({ action: 'process' as const }),
       );
 
       const config = createMockConfig({
@@ -1075,7 +1075,7 @@ describe('ProcessingPipeline', () => {
             (): RetryDecision => ({ action: 'discard' as const, reason: '' }),
           ),
           getDelay: mock(() => 1000),
-          precheck: precheckMock,
+          shouldProcess: shouldProcessMock,
         },
       });
 
@@ -1084,11 +1084,11 @@ describe('ProcessingPipeline', () => {
 
       await pipeline.process(new Uint8Array(), receipt);
 
-      expect(precheckMock).toHaveBeenCalledWith({ envelope, receipt });
+      expect(shouldProcessMock).toHaveBeenCalledWith({ envelope, receipt });
       expect(callbackMock).toHaveBeenCalled();
     });
 
-    it('should dead-letter without invoking the callback when precheck flags the message as poisoned', async () => {
+    it('should dead-letter without invoking the callback when shouldProcess flags the message as poisoned', async () => {
       const envelope = createTestEnvelope();
       const callbackMock = mock(async () => {});
       const sendToDeadLetterMock = mock(async () => {});
@@ -1112,8 +1112,8 @@ describe('ProcessingPipeline', () => {
             (): RetryDecision => ({ action: 'discard' as const, reason: '' }),
           ),
           getDelay: mock(() => 1000),
-          precheck: mock(
-            (): PrecheckDecision => ({
+          shouldProcess: mock(
+            (): ProcessDecision => ({
               action: 'dead-letter' as const,
               queue: 'undeliverable',
               reason:
@@ -1181,8 +1181,8 @@ describe('ProcessingPipeline', () => {
             (): RetryDecision => ({ action: 'discard' as const, reason: '' }),
           ),
           getDelay: mock(() => 1000),
-          precheck: mock(
-            (): PrecheckDecision => ({
+          shouldProcess: mock(
+            (): ProcessDecision => ({
               action: 'dead-letter' as const,
               queue: 'undeliverable',
               reason: 'poisoned',
@@ -1468,9 +1468,9 @@ function createMockConfig(
   )
     ? overrides.retryPolicy
     : {
-        precheck: mock(
-          (): PrecheckDecision => ({
-            action: 'pass' as const,
+        shouldProcess: mock(
+          (): ProcessDecision => ({
+            action: 'process' as const,
           }),
         ),
         shouldRetry: mock(

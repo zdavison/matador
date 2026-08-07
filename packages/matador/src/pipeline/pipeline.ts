@@ -161,31 +161,31 @@ export class ProcessingPipeline {
       };
     }
 
+    const isResumable = isResumableSubscriber(subscriber);
+
     // 3. Pre-execution poison check, based on delivery metadata alone.
     //
     // Catches a message that's already known-poisoned (e.g. delivery count at/above the threshold)
     // before running the callback
-    const precheckResult = await this.runPrecheck(
+    const shouldProcessResult = await this.handleShouldProcess(
       envelope,
       subscriberDef,
-      subscriber,
+      isResumable,
       receipt,
       startTime,
     );
     // If the message is poisoned, return the result immediately
-    if (precheckResult.success === false) {
-      return precheckResult;
+    if (!shouldProcessResult.success) {
+      return shouldProcessResult;
     }
 
     // 4. Execute subscriber callback with hooks
     let result: unknown;
     let error: Error | undefined;
     let context: ResumableContext | undefined;
-
-    // For resumable subscribers, load existing checkpoint and create context
-    const isResumable = isResumableSubscriber(subscriber);
     let existingCheckpoint: Checkpoint | undefined;
 
+    // For resumable subscribers, load existing checkpoint and create context
     if (isResumable) {
       existingCheckpoint = await this.checkpointStore.get(envelope.id);
 
@@ -285,64 +285,40 @@ export class ProcessingPipeline {
       receipt,
     });
 
-    // Update envelope with error info
-    envelope.docket.lastError = error.message;
-    envelope.docket.firstError ??= error.message;
-
-    // Clear checkpoint on dead-letter (terminal state)
-    if (decision.action === 'dead-letter' && context) {
-      await context.clear();
-      await this.hooks.onCheckpointCleared?.({
-        envelope,
-        subscriber: subscriberDef,
-        reason: 'dead-letter',
-      });
-    }
-
-    await this.handleRetryDecision(receipt, envelope, decision);
-
-    await this.hooks.onWorkerError({
-      envelope,
-      subscriber: subscriberDef,
-      error,
-      durationMs,
-      decision,
-      transport: receipt.sourceTransport,
-    });
-
-    return {
-      success: false,
-      envelope,
-      subscriber: subscriberDef,
+    return await this.handleFailure(
       error,
       decision,
+      envelope,
+      subscriberDef,
+      isResumable,
+      receipt,
       durationMs,
-    };
+    );
   }
 
   /**
-   * Runs the retry policy's pre-execution check.
+   * Runs the retry policy's pre-processing check.
    *
    * This returns a terminal `ProcessResult` if the message should be skipped (dead-lettered/discarded) without ever invoking the callback,
-   * or a success result if the precheck passes and we should continue processing the message.
+   * or a success result if shouldProcess passes and we should continue processing the message.
    * @param envelope - The message envelope
    * @param subscriberDef - The subscriber definition
-   * @param subscriber - The subscriber
+   * @param isResumable - Whether the subscriber is resumable
    * @param receipt - The message receipt
    * @param startTime - The start time of the processing
-   * @returns A `ProcessResult` indicating if we should continue or stop processing the message
+   * @returns A `ProcessResult` indicating if we should continue with processing the message, or fail it preemptively
    */
-  private async runPrecheck(
+  private async handleShouldProcess(
     envelope: Envelope,
     subscriberDef: SubscriberDefinition,
-    subscriber: Subscriber<MatadorEvent<unknown>>,
+    isResumable: boolean,
     receipt: MessageReceipt,
     startTime: number,
   ): Promise<ProcessResult> {
-    const decision = this.retryPolicy.precheck({ envelope, receipt });
+    const decision = this.retryPolicy.shouldProcess({ envelope, receipt });
 
-    // If the precheck passes, we can proceed with normal processing
-    if (decision.action === 'pass') {
+    // If shouldProcess passes, we can proceed with normal processing
+    if (decision.action === 'process') {
       return {
         success: true,
         durationMs: 0,
@@ -351,16 +327,47 @@ export class ProcessingPipeline {
 
     // Otherwise, the message needs to be handled accordingly (e.g. dead-lettered or discarded)
 
+    const durationMs = performance.now() - startTime;
     const error = new Error(decision.reason);
 
+    return await this.handleFailure(
+      error,
+      decision,
+      envelope,
+      subscriberDef,
+      isResumable,
+      receipt,
+      durationMs,
+    );
+  }
+
+  /**
+   * Performs failure handling and cleanup based on retry decision (e.g. dead-letter).
+   *
+   * @param error - The error from the processing attempt
+   * @param decision - The decision from executing the appropriate retry policy check
+   * @param envelope - The message envelope
+   * @param subscriberDef - The subscriber definition
+   * @param isResumable - Whether the subscriber is resumable
+   * @param receipt - The message receipt
+   * @param durationMs - The duration of processing
+   * @returns A `ProcessResult` indicating failure
+   */
+  private async handleFailure(
+    error: Error,
+    decision: RetryDecision,
+    envelope: Envelope,
+    subscriberDef: SubscriberDefinition,
+    isResumable: boolean,
+    receipt: MessageReceipt,
+    durationMs: number,
+  ): Promise<ProcessResult> {
+    // Update envelope with error info
     envelope.docket.lastError = error.message;
     envelope.docket.firstError ??= error.message;
 
-    // Clear any checkpoint left over from a prior (crashed) attempt
-    if (
-      decision.action === 'dead-letter' &&
-      isResumableSubscriber(subscriber)
-    ) {
+    // Clear checkpoint on dead-letter (terminal state)
+    if (decision.action === 'dead-letter' && isResumable) {
       await this.checkpointStore.delete(envelope.id);
       await this.hooks.onCheckpointCleared?.({
         envelope,
@@ -370,8 +377,6 @@ export class ProcessingPipeline {
     }
 
     await this.handleRetryDecision(receipt, envelope, decision);
-
-    const durationMs = performance.now() - startTime;
 
     await this.hooks.onWorkerError({
       envelope,

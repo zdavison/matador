@@ -1,6 +1,6 @@
 export type {
-  PrecheckContext,
-  PrecheckDecision,
+  ProcessContext,
+  ProcessDecision,
   RetryContext,
   RetryDecision,
   RetryPolicy,

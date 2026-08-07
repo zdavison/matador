@@ -185,25 +185,25 @@ describe('StandardRetryPolicy', () => {
     });
   });
 
-  describe('precheck', () => {
+  describe('shouldProcess', () => {
     it('should return pass when delivery count is under the threshold', () => {
       const policy = new StandardRetryPolicy({ maxDeliveries: 5 });
-      const { envelope, receipt } = createPrecheckContext({
+      const { envelope, receipt } = createProcessContext({
         deliveryCount: 4,
       });
 
-      const decision = policy.precheck({ envelope, receipt });
+      const decision = policy.shouldProcess({ envelope, receipt });
 
-      expect(decision.action).toBe('pass');
+      expect(decision.action).toBe('process');
     });
 
     it('should dead-letter when delivery count is at/above the threshold, without an error', () => {
       const policy = new StandardRetryPolicy({ maxDeliveries: 5 });
-      const { envelope, receipt } = createPrecheckContext({
+      const { envelope, receipt } = createProcessContext({
         deliveryCount: 5,
       });
 
-      const decision = policy.precheck({ envelope, receipt });
+      const decision = policy.shouldProcess({ envelope, receipt });
 
       expect(decision.action).toBe('dead-letter');
       if (decision.action !== 'dead-letter') {
@@ -214,19 +214,19 @@ describe('StandardRetryPolicy', () => {
     });
 
     it('should agree with shouldRetry on the same poisoned receipt', () => {
-      // precheck and shouldRetry share the same poison-detection logic, so
+      // shouldProcess and shouldRetry share the same poison-detection logic, so
       // a message flagged by one must be flagged the same way by the other.
       const policy = new StandardRetryPolicy({ maxDeliveries: 5 });
       const receiptOverrides = { attemptNumber: 1, deliveryCount: 5 };
       const context = createContext(new Error('Some error'), receiptOverrides);
 
-      const precheckDecision = policy.precheck({
+      const processDecision = policy.shouldProcess({
         envelope: context.envelope,
         receipt: context.receipt,
       });
       const shouldRetryDecision = policy.shouldRetry(context);
 
-      expect(precheckDecision as RetryDecision).toEqual(shouldRetryDecision);
+      expect(processDecision as RetryDecision).toEqual(shouldRetryDecision);
     });
   });
 
@@ -365,9 +365,7 @@ function createContext(
   };
 }
 
-function createPrecheckContext(
-  receiptOverrides: Partial<MessageReceipt> = {},
-): {
+function createProcessContext(receiptOverrides: Partial<MessageReceipt> = {}): {
   envelope: RetryContext['envelope'];
   receipt: MessageReceipt;
 } {

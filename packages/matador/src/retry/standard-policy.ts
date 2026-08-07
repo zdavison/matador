@@ -8,8 +8,8 @@ import {
 import type { MessageReceipt } from '../transport/index.js';
 import type { Envelope } from '../types/index.js';
 import type {
-  PrecheckContext,
-  PrecheckDecision,
+  ProcessContext,
+  ProcessDecision,
   RetryContext,
   RetryDecision,
   RetryPolicy,
@@ -71,16 +71,29 @@ export class StandardRetryPolicy implements RetryPolicy {
   }
 
   /**
-   * Check if the message should be dead-lettered or discarded before the subscriber callback is invoked
+   * Check if the message should be dead-lettered before the subscriber callback is invoked
    *
-   * Uses the same delivery-count threshold as `shouldRetry`'s
-   * poison check, so an already-poisoned message is dead-lettered without ever running the callback again.
+   * Uses the same delivery-count threshold as `shouldRetry` poison check, so an
+   * already-poisoned message is dead-lettered without ever running the callback again.
    *
-   * @param context - The precheck context.
-   * @returns A 'pass' decision if the message is not poisoned, a poison decision otherwise.
+   * @param context - The shouldProcess context.
+   * @returns A 'process' decision if the message is not poisoned; a dead-letter decision otherwise.
    */
-  precheck(context: PrecheckContext): PrecheckDecision {
-    return this.checkPoisoned(context.envelope, context.receipt);
+  shouldProcess(context: ProcessContext): ProcessDecision {
+    // Poison message detection - prevent crash loops
+    const poisonError = this.checkPoisoned(context.envelope, context.receipt);
+
+    // If the message is poisoned, dead-letter it
+    if (poisonError) {
+      return {
+        action: 'dead-letter',
+        queue: 'undeliverable',
+        reason: poisonError.message,
+      };
+    }
+
+    // Allow processing to continue
+    return { action: 'process' };
   }
 
   shouldRetry(context: RetryContext): RetryDecision {
@@ -88,11 +101,15 @@ export class StandardRetryPolicy implements RetryPolicy {
     const errorMessage = error.message;
 
     // 1. Poison message detection - prevent crash loops
-    const poisonDecision = this.checkPoisoned(envelope, receipt);
+    const poisonError = this.checkPoisoned(envelope, receipt);
 
-    // If the message is poisoned, return the poison decision
-    if (poisonDecision.action !== 'pass') {
-      return poisonDecision;
+    // If the message is poisoned, dead-letter it
+    if (poisonError) {
+      return {
+        action: 'dead-letter',
+        queue: 'undeliverable',
+        reason: poisonError.message,
+      };
     }
 
     // 2. Assertion errors never retry
@@ -173,24 +190,19 @@ export class StandardRetryPolicy implements RetryPolicy {
    *
    * @param envelope - The message envelope.
    * @param receipt - The message receipt.
-   * @returns A dead-letter decision if the message is poisoned, a pass decision otherwise.
+   * @returns A MessageMaybePoisonedError if the message is poisoned; null otherwise
    */
   private checkPoisoned(
     envelope: Envelope,
     receipt: MessageReceipt,
-  ): PrecheckDecision {
+  ): MessageMaybePoisonedError | null {
     if (receipt.deliveryCount >= this.config.maxDeliveries) {
-      const poisonError = new MessageMaybePoisonedError(
+      return new MessageMaybePoisonedError(
         envelope.id,
         receipt.deliveryCount,
         this.config.maxDeliveries,
       );
-      return {
-        action: 'dead-letter',
-        queue: 'undeliverable',
-        reason: poisonError.message,
-      };
     }
-    return { action: 'pass' };
+    return null;
   }
 }
