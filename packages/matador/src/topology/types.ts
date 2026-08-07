@@ -134,6 +134,21 @@ export interface QueueDefinition {
   readonly priorities?: boolean | undefined;
 
   /**
+   * Restricts the queue to one active consumer at a time.
+   *
+   * Only RabbitMQ supports this option, with the `x-single-active-consumer`
+   * argument. Other transports ignore the option. RabbitMQ also ignores the
+   * option when you set a custom `transport.rabbitmq.options` override on the
+   * queue.
+   *
+   * With `concurrency: 1`, RabbitMQ delivers the queue in order, one message
+   * at a time, to the active consumer.
+   *
+   * @default false
+   */
+  readonly singleActiveConsumer?: boolean | undefined;
+
+  /**
    * When true, the queue name is used exactly as provided without any
    * modification. The namespace prefix will NOT be added, and no other
    * transformations will be applied. Use this for referencing external

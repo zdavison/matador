@@ -29,6 +29,8 @@ An opinionated, batteries-included framework for using event transports (e.g. `R
   - [Hooks](#hooks)
   - [idempotent](#idempotent)
   - [ResumableSubscriber](#resumablesubscriber)
+  - [Ordering and concurrency guarantees](#ordering-and-concurrency-guarantees)
+  - [Single active consumer (RabbitMQ)](#single-active-consumer-rabbitmq)
 - [Why it works this way](#why-it-works-this-way)
   - [Sending one message will result in a unique message per subscriber](#sending-one-message-will-result-in-a-unique-message-per-subscriber)
   - [You are working in a monorepo](#you-are-working-in-a-monorepo)
@@ -600,6 +602,45 @@ const enrichUserData: Subscriber<UserCreatedEvent> = {
 ```
 
 Each `io()` key must be unique within the subscriber and stable across retries. Use descriptive names like `'fetch-user'`, `'send-email'`, or `'charge-payment'`.
+
+### Ordering and concurrency guarantees
+
+By default, **Matador** guarantees no ordering across the messages on a queue. Each consumer also processes several messages at once.
+
+Three things break ordering:
+
+- Fanout creates an independent envelope for each subscriber.
+- A retry re-publishes the failed message to the back of the queue.
+- The `concurrency` setting of a queue gives several messages to a consumer at the same time.
+
+Write your subscribers so that they do not depend on order.
+
+`Transport.capabilities` reports what a transport does by default. The value is a static property of the transport, not a configuration point. Queue options do not change the value.
+
+- `ordering`: the guarantee for message order.
+  - `'none'`: no guarantee. `RabbitMQTransport` reports this value.
+  - `'queue'`: FIFO. `LocalTransport` reports this value.
+  - `'partition'`: ordered for each key, for future transports that use partitions.
+- `concurrencyModel`: how the transport runs work in parallel.
+  - `'prefetch'`: RabbitMQ reports this value.
+  - `'worker'`, `'partition'`, `'none'`: values for other transports.
+
+To process a queue in order, one message at a time, set both [`singleActiveConsumer`](#single-active-consumer-rabbitmq) and `concurrency: 1` on the queue. A retry still sends a failed message to the back of the queue (see [Retry Queue](#retry-queue)). Order therefore holds only while no message fails.
+
+### Single active consumer (RabbitMQ)
+
+RabbitMQ can restrict a queue to one active consumer at a time, with the `x-single-active-consumer` queue argument. Matador sets the argument when you set `singleActiveConsumer` on the queue. Other transports ignore the option.
+
+```ts
+const topology = TopologyBuilder.create()
+  .withNamespace('myapp')
+  .addQueue('events', { singleActiveConsumer: true, concurrency: 1 })
+  .build();
+```
+
+When several consumers subscribe to the queue, only the active consumer receives messages. If the active consumer disconnects, RabbitMQ promotes another subscribed consumer. With `concurrency: 1`, the active consumer must ack or nack a message before RabbitMQ delivers the next message.
+
+Matador ignores `singleActiveConsumer` when you set a custom `transport.rabbitmq.options` override on the queue. In that case, add `x-single-active-consumer` to the `arguments` object of the override.
 
 # Why it works this way
 

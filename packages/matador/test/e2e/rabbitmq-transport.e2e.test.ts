@@ -12,7 +12,7 @@ import {
   type StartedRabbitMQContainer,
 } from '@testcontainers/rabbitmq';
 import amqplib from 'amqplib';
-import type { Topology } from '../../src/topology/types.js';
+import type { QueueDefinition, Topology } from '../../src/topology/types.js';
 import type { Subscription } from '../../src/transport/index.js';
 import { RabbitMQTransport } from '../../src/transport/rabbitmq/rabbitmq-transport.js';
 import {
@@ -82,7 +82,10 @@ describe.skipIf(SKIP_E2E)('RabbitMQ Transport E2E', () => {
 
     it('should handle message priority', async () => {
       const topology = createTestTopology(`priority-${Date.now()}`);
-      topology.queues[0] = { ...topology.queues[0], priorities: true };
+      (topology.queues as unknown as QueueDefinition[])[0] = {
+        ...topology.queues[0],
+        priorities: true,
+      };
 
       await transport.applyTopology(topology);
       const queueName = `${topology.namespace}.events`;
@@ -664,6 +667,86 @@ describe.skipIf(SKIP_E2E)('RabbitMQ Transport E2E', () => {
       // Each queue should respect its own prefetch
       expect(queue1MaxConcurrent).toBeLessThanOrEqual(2);
       expect(queue2MaxConcurrent).toBeLessThanOrEqual(3);
+    });
+  });
+
+  describe('single active consumer', () => {
+    let transport: RabbitMQTransport;
+    let subscriptions: Subscription[] = [];
+
+    beforeEach(async () => {
+      transport = new RabbitMQTransport({
+        url: connectionUrl,
+        connectionName: 'matador-sac-test',
+        quorumQueues: false,
+        defaultPrefetch: 1,
+      });
+      await transport.connect();
+    });
+
+    afterEach(async () => {
+      for (const sub of subscriptions) {
+        if (sub.isActive) {
+          await sub.unsubscribe();
+        }
+      }
+      subscriptions = [];
+      if (transport.isConnected()) {
+        await transport.disconnect();
+      }
+    });
+
+    it('routes messages to only one of several consumers, failing over when it disconnects', async () => {
+      const topology = createTestTopology(`sac-${Date.now()}`);
+      (topology.queues as unknown as QueueDefinition[])[0] = {
+        ...topology.queues[0],
+        singleActiveConsumer: true,
+      };
+      await transport.applyTopology(topology);
+      const queueName = `${topology.namespace}.events`;
+
+      const receivedByA: string[] = [];
+      const receivedByB: string[] = [];
+
+      const subA = await transport.subscribe(
+        queueName,
+        async (env, receipt) => {
+          receivedByA.push(env.id);
+          await transport.complete(receipt);
+        },
+      );
+      subscriptions.push(subA);
+
+      const subB = await transport.subscribe(
+        queueName,
+        async (env, receipt) => {
+          receivedByB.push(env.id);
+          await transport.complete(receipt);
+        },
+      );
+      subscriptions.push(subB);
+
+      for (let i = 0; i < 5; i++) {
+        await transport.send(queueName, createTestEnvelope({ id: `sac-${i}` }));
+      }
+
+      await waitFor(() => receivedByA.length + receivedByB.length >= 5, 5000);
+
+      // Only the (first-subscribed) active consumer should receive messages
+      // while both remain subscribed.
+      expect(receivedByA.length).toBe(5);
+      expect(receivedByB.length).toBe(0);
+
+      // Disconnecting the active consumer should fail over to the other one.
+      await subA.unsubscribe();
+      subscriptions = subscriptions.filter((s) => s !== subA);
+
+      for (let i = 5; i < 10; i++) {
+        await transport.send(queueName, createTestEnvelope({ id: `sac-${i}` }));
+      }
+
+      await waitFor(() => receivedByB.length >= 5, 5000);
+      expect(receivedByB.length).toBe(5);
     });
   });
 });
