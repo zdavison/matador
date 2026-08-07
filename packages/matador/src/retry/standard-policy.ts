@@ -8,7 +8,6 @@ import {
 import type { MessageReceipt } from '../transport/index.js';
 import type { Envelope } from '../types/index.js';
 import type {
-  PoisonedMessageDecision,
   PrecheckContext,
   PrecheckDecision,
   RetryContext,
@@ -81,8 +80,7 @@ export class StandardRetryPolicy implements RetryPolicy {
    * @returns A 'pass' decision if the message is not poisoned, a poison decision otherwise.
    */
   precheck(context: PrecheckContext): PrecheckDecision {
-    const decision = this.checkPoisoned(context.envelope, context.receipt);
-    return decision.action === 'not-poisoned' ? { action: 'pass' } : decision;
+    return this.checkPoisoned(context.envelope, context.receipt);
   }
 
   shouldRetry(context: RetryContext): RetryDecision {
@@ -93,7 +91,7 @@ export class StandardRetryPolicy implements RetryPolicy {
     const poisonDecision = this.checkPoisoned(envelope, receipt);
 
     // If the message is poisoned, return the poison decision
-    if (poisonDecision.action !== 'not-poisoned') {
+    if (poisonDecision.action !== 'pass') {
       return poisonDecision;
     }
 
@@ -175,12 +173,12 @@ export class StandardRetryPolicy implements RetryPolicy {
    *
    * @param envelope - The message envelope.
    * @param receipt - The message receipt.
-   * @returns A dead-letter decision if the message is poisoned, a not-poisoned decision otherwise.
+   * @returns A dead-letter decision if the message is poisoned, a pass decision otherwise.
    */
   private checkPoisoned(
     envelope: Envelope,
     receipt: MessageReceipt,
-  ): PoisonedMessageDecision {
+  ): PrecheckDecision {
     if (receipt.deliveryCount >= this.config.maxDeliveries) {
       const poisonError = new MessageMaybePoisonedError(
         envelope.id,
@@ -193,6 +191,6 @@ export class StandardRetryPolicy implements RetryPolicy {
         reason: poisonError.message,
       };
     }
-    return { action: 'not-poisoned' };
+    return { action: 'pass' };
   }
 }

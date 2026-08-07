@@ -31,13 +31,6 @@ export type RetryDecision =
   | { readonly action: 'discard'; readonly reason: string };
 
 /**
- * Decision for a poisoned message
- */
-export type PoisonedMessageDecision =
-  | { action: 'not-poisoned' }
-  | Extract<RetryDecision, { action: 'dead-letter' | 'discard' }>;
-
-/**
  * Decision a pre-execution check can return
  */
 export type PrecheckDecision =
