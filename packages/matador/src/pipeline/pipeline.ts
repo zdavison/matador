@@ -165,7 +165,7 @@ export class ProcessingPipeline {
     //
     // Catches a message that's already known-poisoned (e.g. delivery count at/above the threshold)
     // before running the callback
-    const precheckResult = await this.runPrecheck(
+    const shouldProcessResult = await this.handleShouldProcess(
       envelope,
       subscriberDef,
       subscriber,
@@ -173,8 +173,8 @@ export class ProcessingPipeline {
       startTime,
     );
     // If the message is poisoned, return the result immediately
-    if (precheckResult.success === false) {
-      return precheckResult;
+    if (!shouldProcessResult.success) {
+      return shouldProcessResult;
     }
 
     // 4. Execute subscriber callback with hooks
@@ -321,10 +321,10 @@ export class ProcessingPipeline {
   }
 
   /**
-   * Runs the retry policy's pre-execution check.
+   * Runs the retry policy's pre-processing check.
    *
    * This returns a terminal `ProcessResult` if the message should be skipped (dead-lettered/discarded) without ever invoking the callback,
-   * or a success result if the precheck passes and we should continue processing the message.
+   * or a success result if shouldProcess passes and we should continue processing the message.
    * @param envelope - The message envelope
    * @param subscriberDef - The subscriber definition
    * @param subscriber - The subscriber
@@ -332,17 +332,17 @@ export class ProcessingPipeline {
    * @param startTime - The start time of the processing
    * @returns A `ProcessResult` indicating if we should continue or stop processing the message
    */
-  private async runPrecheck(
+  private async handleShouldProcess(
     envelope: Envelope,
     subscriberDef: SubscriberDefinition,
     subscriber: Subscriber<MatadorEvent<unknown>>,
     receipt: MessageReceipt,
     startTime: number,
   ): Promise<ProcessResult> {
-    const decision = this.retryPolicy.precheck({ envelope, receipt });
+    const decision = this.retryPolicy.shouldProcess({ envelope, receipt });
 
-    // If the precheck passes, we can proceed with normal processing
-    if (decision.action === 'pass') {
+    // If shouldProcess passes, we can proceed with normal processing
+    if (decision.action === 'process') {
       return {
         success: true,
         durationMs: 0,
