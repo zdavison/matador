@@ -14,9 +14,7 @@ import type {
   CallbackContext,
   Dispatcher,
   Envelope,
-  MatadorEvent,
   ResumableCallbackContext,
-  Subscriber,
   SubscriberDefinition,
 } from '../types/index.js';
 import { isResumableSubscriber } from '../types/index.js';
