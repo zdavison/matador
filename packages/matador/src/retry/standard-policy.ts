@@ -60,7 +60,7 @@ export const defaultRetryConfig: StandardRetryPolicyConfig = {
  * 3. DontRetry → dead-letter (explicit no-retry)
  * 4. DoRetry → retry if under max attempts
  * 5. Max attempts exceeded → dead-letter
- * 6. Non-idempotent subscriber on redelivery → dead-letter
+ * 6. Non-idempotent subscriber → dead-letter
  * 7. Default → retry with exponential backoff
  */
 export class StandardRetryPolicy implements RetryPolicy {

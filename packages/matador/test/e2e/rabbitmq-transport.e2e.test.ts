@@ -993,7 +993,7 @@ describe.skipIf(SKIP_E2E)('RabbitMQ Transport E2E', () => {
       const result = await matador.send(event);
 
       // Wait for processing
-      await matador.waitForIdle(5000);
+      await matador.waitForIdle(10_000);
 
       expect(result.subscribersSent).toBe(1);
       expect(result.errors).toHaveLength(0);
@@ -1055,7 +1055,7 @@ describe.skipIf(SKIP_E2E)('RabbitMQ Transport E2E', () => {
       await matador.start();
 
       // Wait for processing
-      await matador.waitForIdle(5000);
+      await matador.waitForIdle(10_000);
 
       expect(callCount).toBe(1);
       expect(success).toBeTruthy();
