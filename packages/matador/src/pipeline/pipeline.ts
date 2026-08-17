@@ -315,8 +315,8 @@ export class ProcessingPipeline {
   ): Promise<ProcessResult> {
     const decision = this.retryPolicy.shouldProcess({
       envelope,
-      receipt,
       subscriber: subscriberDef,
+      receipt,
     });
 
     // If shouldProcess passes, we can proceed with normal processing
