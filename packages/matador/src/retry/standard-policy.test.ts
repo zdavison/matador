@@ -188,22 +188,22 @@ describe('StandardRetryPolicy', () => {
   describe('shouldProcess', () => {
     it('should return pass when delivery count is under the threshold', () => {
       const policy = new StandardRetryPolicy({ maxDeliveries: 5 });
-      const { envelope, receipt } = createProcessContext({
+      const { envelope, subscriber, receipt } = createProcessContext({
         deliveryCount: 4,
       });
 
-      const decision = policy.shouldProcess({ envelope, receipt });
+      const decision = policy.shouldProcess({ envelope, subscriber, receipt });
 
       expect(decision.action).toBe('process');
     });
 
     it('should dead-letter when delivery count is at/above the threshold, without an error', () => {
       const policy = new StandardRetryPolicy({ maxDeliveries: 5 });
-      const { envelope, receipt } = createProcessContext({
+      const { envelope, subscriber, receipt } = createProcessContext({
         deliveryCount: 5,
       });
 
-      const decision = policy.shouldProcess({ envelope, receipt });
+      const decision = policy.shouldProcess({ envelope, subscriber, receipt });
 
       expect(decision.action).toBe('dead-letter');
       if (decision.action !== 'dead-letter') {
@@ -222,6 +222,7 @@ describe('StandardRetryPolicy', () => {
 
       const processDecision = policy.shouldProcess({
         envelope: context.envelope,
+        subscriber: context.subscriber,
         receipt: context.receipt,
       });
       const shouldRetryDecision = policy.shouldRetry(context);
@@ -367,11 +368,12 @@ function createContext(
 
 function createProcessContext(receiptOverrides: Partial<MessageReceipt> = {}): {
   envelope: RetryContext['envelope'];
+  subscriber: SubscriberDefinition;
   receipt: MessageReceipt;
 } {
-  const { envelope, receipt } = createContext(
+  const { envelope, subscriber, receipt } = createContext(
     new Error('unused'),
     receiptOverrides,
   );
-  return { envelope, receipt };
+  return { envelope, subscriber, receipt };
 }

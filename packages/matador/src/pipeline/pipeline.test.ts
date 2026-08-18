@@ -1049,7 +1049,7 @@ describe('ProcessingPipeline', () => {
     });
   });
 
-  describe('pre-execution poison check', () => {
+  describe('pre-processing check', () => {
     it('should call retryPolicy.shouldProcess before invoking the callback', async () => {
       const envelope = createTestEnvelope();
       const callbackMock = mock(async () => {});
@@ -1057,12 +1057,14 @@ describe('ProcessingPipeline', () => {
         (): ProcessDecision => ({ action: 'process' as const }),
       );
 
+      const subscriberDef = createSubscriberDefinition();
+
       const config = createMockConfig({
         codec: {
           decode: mock(() => envelope),
         },
         schema: {
-          getSubscriberDefinition: mock(() => createSubscriberDefinition()),
+          getSubscriberDefinition: mock(() => subscriberDef),
           getExecutableSubscriber: mock(() => ({
             name: 'test-subscriber',
             description: 'Test subscriber',
@@ -1084,7 +1086,11 @@ describe('ProcessingPipeline', () => {
 
       await pipeline.process(new Uint8Array(), receipt);
 
-      expect(shouldProcessMock).toHaveBeenCalledWith({ envelope, receipt });
+      expect(shouldProcessMock).toHaveBeenCalledWith({
+        envelope,
+        subscriber: subscriberDef,
+        receipt,
+      });
       expect(callbackMock).toHaveBeenCalled();
     });
 

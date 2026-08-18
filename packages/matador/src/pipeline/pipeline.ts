@@ -313,7 +313,11 @@ export class ProcessingPipeline {
     receipt: MessageReceipt,
     startTime: number,
   ): Promise<ProcessResult> {
-    const decision = this.retryPolicy.shouldProcess({ envelope, receipt });
+    const decision = this.retryPolicy.shouldProcess({
+      envelope,
+      subscriber: subscriberDef,
+      receipt,
+    });
 
     // If shouldProcess passes, we can proceed with normal processing
     if (decision.action === 'process') {

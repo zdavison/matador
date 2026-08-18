@@ -45,6 +45,9 @@ export interface ProcessContext {
   /** The message envelope */
   readonly envelope: Envelope;
 
+  /** The subscriber definition */
+  readonly subscriber: SubscriberDefinition;
+
   /** Message receipt with delivery information */
   readonly receipt: MessageReceipt;
 }
