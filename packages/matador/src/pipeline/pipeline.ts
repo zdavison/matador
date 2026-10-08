@@ -228,99 +228,104 @@ export class ProcessingPipeline {
         ? this.statusTracker
         : undefined;
     const reporter = tracker?.startProgress(envelope);
-    const report = (percent: number, details?: JsonSerializable): void => {
-      reporter?.report(percent, details);
-    };
-    await tracker?.markActive(envelope);
-    const callbackContext: CallbackContext = {
-      matador: this.dispatcher,
-      progress: report,
-    };
+    try {
+      const report = (percent: number, details?: JsonSerializable): void => {
+        reporter?.report(percent, details);
+      };
+      await tracker?.markActive(envelope);
+      const callbackContext: CallbackContext = {
+        matador: this.dispatcher,
+        progress: report,
+      };
 
-    await this.hooks.onWorkerWrap(envelope, subscriberDef, async () => {
-      await this.hooks.onWorkerBeforeProcess(envelope, subscriberDef);
+      await this.hooks.onWorkerWrap(envelope, subscriberDef, async () => {
+        await this.hooks.onWorkerBeforeProcess(envelope, subscriberDef);
 
-      try {
-        if (isResumable && context) {
-          // Resumable subscriber: pass combined context (checkpoint + matador)
-          // Cast needed because TypeScript can't narrow the union type based on isResumable
-          const resumableCallback = subscriber.callback as (
-            envelope: Envelope,
-            context: ResumableCallbackContext,
-          ) => Promise<void> | void;
-          // Create combined context by binding class methods and adding matador
-          const fullContext: ResumableCallbackContext = {
-            io: context.io.bind(context),
-            all: context.all.bind(context),
-            attempt: context.attempt,
-            isRetry: context.isRetry,
-            matador: this.dispatcher,
-            progress: report,
-          };
-          result = await resumableCallback(envelope, fullContext);
-        } else {
-          // Standard subscriber: pass envelope and callback context
-          const standardCallback = subscriber.callback as (
-            envelope: Envelope,
-            context: CallbackContext,
-          ) => Promise<void> | void;
-          result = await standardCallback(envelope, callbackContext);
+        try {
+          if (isResumable && context) {
+            // Resumable subscriber: pass combined context (checkpoint + matador)
+            // Cast needed because TypeScript can't narrow the union type based on isResumable
+            const resumableCallback = subscriber.callback as (
+              envelope: Envelope,
+              context: ResumableCallbackContext,
+            ) => Promise<void> | void;
+            // Create combined context by binding class methods and adding matador
+            const fullContext: ResumableCallbackContext = {
+              io: context.io.bind(context),
+              all: context.all.bind(context),
+              attempt: context.attempt,
+              isRetry: context.isRetry,
+              matador: this.dispatcher,
+              progress: report,
+            };
+            result = await resumableCallback(envelope, fullContext);
+          } else {
+            // Standard subscriber: pass envelope and callback context
+            const standardCallback = subscriber.callback as (
+              envelope: Envelope,
+              context: CallbackContext,
+            ) => Promise<void> | void;
+            result = await standardCallback(envelope, callbackContext);
+          }
+        } catch (e) {
+          error = e instanceof Error ? e : new Error(String(e));
         }
-      } catch (e) {
-        error = e instanceof Error ? e : new Error(String(e));
-      }
-    });
-
-    const durationMs = performance.now() - startTime;
-
-    // 5. Handle success
-    if (!error) {
-      // Clear checkpoint on success for resumable subscribers
-      if (context) {
-        await context.clear();
-        await this.hooks.onCheckpointCleared?.({
-          envelope,
-          subscriber: subscriberDef,
-          reason: 'success',
-        });
-      }
-
-      await this.transport.complete(receipt);
-      await tracker?.markCompleted(envelope, result, reporter);
-      await this.hooks.onWorkerSuccess({
-        envelope,
-        subscriber: subscriberDef,
-        result,
-        durationMs,
-        transport: receipt.sourceTransport,
       });
 
-      return {
-        success: true,
+      const durationMs = performance.now() - startTime;
+
+      // 5. Handle success
+      if (!error) {
+        // Clear checkpoint on success for resumable subscribers
+        if (context) {
+          await context.clear();
+          await this.hooks.onCheckpointCleared?.({
+            envelope,
+            subscriber: subscriberDef,
+            reason: 'success',
+          });
+        }
+
+        await this.transport.complete(receipt);
+        await tracker?.markCompleted(envelope, result, reporter);
+        await this.hooks.onWorkerSuccess({
+          envelope,
+          subscriber: subscriberDef,
+          result,
+          durationMs,
+          transport: receipt.sourceTransport,
+        });
+
+        return {
+          success: true,
+          envelope,
+          subscriber: subscriberDef,
+          durationMs,
+        };
+      }
+
+      // 6. Handle failure - consult retry policy
+      const decision = this.retryPolicy.shouldRetry({
         envelope,
+        error,
         subscriber: subscriberDef,
+        receipt,
+      });
+
+      return await this.handleFailure(
+        error,
+        decision,
+        envelope,
+        subscriberDef,
+        isResumable,
+        receipt,
         durationMs,
-      };
+        reporter,
+      );
+    } finally {
+      // Stop on every exit path, so no late progress write follows a newer status
+      await reporter?.stop();
     }
-
-    // 6. Handle failure - consult retry policy
-    const decision = this.retryPolicy.shouldRetry({
-      envelope,
-      error,
-      subscriber: subscriberDef,
-      receipt,
-    });
-
-    return await this.handleFailure(
-      error,
-      decision,
-      envelope,
-      subscriberDef,
-      isResumable,
-      receipt,
-      durationMs,
-      reporter,
-    );
   }
 
   /**

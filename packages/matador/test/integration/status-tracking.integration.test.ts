@@ -362,8 +362,73 @@ describe('status tracking: lifecycle', () => {
     expect(all?.thumbnail?.status).toBe('failed');
   });
 
+  it('drops pending progress when process exits by a throw', async () => {
+    class FullRecordStore extends MemoryStatusStore {
+      readonly received: StatusRecord[] = [];
+
+      override async set(
+        trackingId: string,
+        subscriberName: string,
+        record: StatusRecord,
+      ) {
+        this.received.push(structuredClone(record));
+        await super.set(trackingId, subscriberName, record);
+      }
+    }
+
+    class ThrowingCompleteTransport extends LocalTransport {
+      private thrown = false;
+
+      override async complete(
+        receipt: Parameters<LocalTransport['complete']>[0],
+      ) {
+        await super.complete(receipt);
+        if (!this.thrown) {
+          this.thrown = true;
+          throw new Error('complete failed');
+        }
+      }
+    }
+
+    const store = new FullRecordStore({ progressIntervalMs: 50 });
+    const subscriber = createSubscriber<JobEvent>({
+      name: 'job-runner',
+      description: 'Runs the job',
+      track: true,
+      callback: async (_envelope, ctx) => {
+        ctx.progress(10);
+        ctx.progress(20);
+      },
+    });
+    matador = new Matador(
+      {
+        transport: new ThrowingCompleteTransport(silentLogger),
+        topology: TopologyBuilder.create()
+          .withNamespace('status-int')
+          .addQueue('events')
+          .build(),
+        schema: { [JobEvent.key]: [JobEvent, [subscriber]] },
+        consumeFrom: ['events'],
+        statusStore: store,
+      },
+      { logger: silentLogger },
+    );
+    await matador.start();
+
+    await matador.send(JobEvent, { userId: 'u-1' }, { trackingId: 'job-1' });
+    await matador.waitForIdle(2000);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect(
+      store.received.some((record) => record.progress?.percent === 10),
+    ).toBe(true);
+    expect(
+      store.received.some((record) => record.progress?.percent === 20),
+    ).toBe(false);
+  });
+
   it('gives untracked subscribers a progress function that does nothing', async () => {
-    const store = new MemoryStatusStore({ progressIntervalMs: 0 });
+    const store = new RecordingStore({ progressIntervalMs: 0 });
     const subscriber = createSubscriber<JobEvent>({
       name: 'audit',
       description: 'Audits the job',
@@ -377,5 +442,6 @@ describe('status tracking: lifecycle', () => {
     await m.waitForIdle(2000);
 
     expect(result.trackingId).toBeUndefined();
+    expect(store.writes).toEqual([]);
   });
 });
