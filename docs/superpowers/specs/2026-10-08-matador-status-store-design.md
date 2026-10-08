@@ -181,6 +181,7 @@ interface StatusRecord {
 - `docket.attempts` counts Matador retries. A transport can report a different attempt number, for example after a crash and a redelivery. v1 does not store the transport value.
 - `error` exists because the docket does not hold all failure causes. `RecordTooLargeError`, `ResultNotSerializableError` and a publish failure are not in the docket. The docket also has no error `name`.
 - `error` has no stack trace. This keeps the record small.
+- Matador bounds the error strings in a stored record to 1024 characters. This covers `error.message`, `docket.firstError` and `docket.lastError`.
 
 ### 5.1 Size limit
 
@@ -276,7 +277,7 @@ A `Map` from `trackingId` to a `Map` from subscriber name to record. It implemen
   - `ttlMs`: required. The store does not choose a retention period for the app.
   - `keyPrefix`: optional. Default: `matador:status:`.
   - `maxRecordBytes` and `progressIntervalMs`: optional. The defaults come from `resolveStatusStoreConfig`.
-- `redis` is a peer dependency of the package. Core Matador has no Redis dependency.
+- The store uses only a small client interface. `redis` is a dev dependency that the package uses for tests, and the package has no runtime dependency on `redis`. Core Matador has no Redis dependency.
 
 ### 7.4 `StatusTracker` (core, internal)
 

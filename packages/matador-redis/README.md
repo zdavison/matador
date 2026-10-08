@@ -15,7 +15,11 @@ import { createClient } from 'redis';
 import { Matador } from '@zdavison/matador';
 import { RedisStatusStore } from '@zdavison/matador-redis';
 
-const client = createClient({ url: process.env.REDIS_URL });
+const client = createClient({
+  url: process.env.REDIS_URL,
+  disableOfflineQueue: true, // Fail fast during an outage
+  socket: { connectTimeout: 5000 },
+});
 await client.connect();
 
 const matador = new Matador({
@@ -28,6 +32,10 @@ const matador = new Matador({
   }),
 });
 ```
+
+## Client settings for an outage
+
+Create the `redis` client with `disableOfflineQueue: true` and a `socket.connectTimeout`. By default, node-redis v4 queues each command while the client is disconnected. The status writes then wait until Redis comes back. The consumer waits for these writes, so it stops to ack messages. With `disableOfflineQueue: true`, each command fails at once. Matador then logs the error and calls the `onStatusStoreError` hook, and message handling continues.
 
 ## Options
 
