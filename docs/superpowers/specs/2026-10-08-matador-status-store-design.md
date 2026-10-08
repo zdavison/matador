@@ -42,7 +42,8 @@ RabbitMQ cannot give the status of one message. AMQP has no operation to find a 
 
 ### 2.3 Rules
 
-- Matador never uses `docket.metadata` or `envelope.data` for logic. Metadata is for observability and debugging only.
+- `envelope.data` belongs to the app. Apps can use `envelope.data` for logic, for example an access check on `userId`. Matador does not read `envelope.data` for logic.
+- `docket.metadata` is for observability and debugging only. Neither Matador nor apps use `docket.metadata` for logic.
 - Matador does not interpret any app field in the record.
 
 ## 3. Concepts
@@ -63,14 +64,10 @@ RabbitMQ cannot give the status of one message. AMQP has no operation to find a 
 interface MatadorConfig {
   // existing fields ...
   readonly statusStore?: StatusStore | undefined;
-  readonly statusTracking?: {
-    /** Limit on the JSON-serialized record, in bytes. Default: 65536 (64 KB). */
-    readonly maxRecordBytes?: number | undefined;
-    /** Minimum time between two progress writes for one record. Default: 1000. */
-    readonly progressIntervalMs?: number | undefined;
-  } | undefined;
 }
 ```
+
+Matador has no other status config. The tracking settings belong to the store, because the right values depend on the backend. Section 7.1 gives the settings.
 
 If the schema has a tracked subscriber and `statusStore` is not set, the `Matador` constructor throws `StatusStoreRequiredError`. Both the dispatcher process and the consumer process need the store. The dispatcher writes the first record, and the consumer writes the later records.
 
@@ -145,7 +142,7 @@ class Matador {
 
 ### 4.7 NestJS
 
-- `MatadorModule.forRoot({ statusStore, statusTracking })` passes both values to Matador.
+- `MatadorModule.forRoot({ statusStore })` passes the store to Matador.
 - `MatadorService.getStatus(...)` has the same overloads as `Matador.getStatus`.
 - `SendResult.trackingId` reaches Nest apps through the existing `MatadorService.send()`.
 
@@ -180,9 +177,9 @@ interface StatusRecord {
 
 ### 5.1 Size limit
 
-Matador serializes the record with `JSON.stringify` and measures the UTF-8 byte length before each write.
+Matador serializes the record with `JSON.stringify` and measures the UTF-8 byte length before each write. Matador reads the limit from `store.config.maxRecordBytes` (section 7.1).
 
-| Write | If the record is larger than `maxRecordBytes` |
+| Write | If the record is larger than `store.config.maxRecordBytes` |
 |---|---|
 | The first record, in `send()` | `send()` throws `RecordTooLargeError` before Matador publishes any envelope. |
 | The `completed` record | Matador writes `failed` with `RecordTooLargeError` and no result. The message is acked. The message is not retried, because the callback has already run. |
@@ -216,7 +213,7 @@ The pipeline has a `RetryDecision` with three actions: `retry`, `dead-letter` an
 ### 6.3 Progress
 
 - `ctx.progress()` stores the latest value in memory and returns at once.
-- Matador writes the latest value at most once in each `progressIntervalMs`. Only one progress write is in flight at a time for each record.
+- Matador writes the latest value at most once in each `store.config.progressIntervalMs`. Only one progress write is in flight at a time for each record.
 - When the callback finishes, Matador drops the pending progress value. The terminal write follows. If a progress write is in flight, Matador waits for that write before the terminal write.
 - `percent` outside 0 to 100 is clamped to that range.
 
@@ -225,7 +222,22 @@ The pipeline has a `RetryDecision` with three actions: `retry`, `dead-letter` an
 ### 7.1 `StatusStore` interface (core)
 
 ```ts
+/** Settings that each store implements. Stores take these in their constructor options. */
+interface StatusStoreConfig {
+  /** Limit on the JSON-serialized record, in bytes. Default: 65536 (64 KB). */
+  readonly maxRecordBytes: number;
+  /** Minimum time between two progress writes for one record. Default: 1000. */
+  readonly progressIntervalMs: number;
+}
+
+/** Fills the defaults. Each store calls this in its constructor. */
+function resolveStatusStoreConfig(
+  options?: Partial<StatusStoreConfig>,
+): StatusStoreConfig;
+
 interface StatusStore {
+  /** The resolved settings. The tracker reads these values. */
+  readonly config: StatusStoreConfig;
   /** Returns all records for one trackingId, keyed by subscriber name. */
   getAll(trackingId: string): Promise<Readonly<Record<string, StatusRecord>> | undefined>;
   get(trackingId: string, subscriberName: string): Promise<StatusRecord | undefined>;
@@ -240,9 +252,11 @@ interface StatusStore {
 
 The interface follows the `CheckpointStore` pattern. It has no atomic operations in v1.
 
+The store owns the settings, and the tracker enforces them. So each store sets the values that suit its backend, but no store reimplements the size check or the coalescing. A store with slow writes can set a longer `progressIntervalMs`, for example.
+
 ### 7.2 `MemoryStatusStore` (core)
 
-A `Map` from `trackingId` to a `Map` from subscriber name to record. It implements `cleanup`. It is for tests and local development.
+A `Map` from `trackingId` to a `Map` from subscriber name to record. It implements `cleanup`. It is for tests and local development. Its constructor takes `Partial<StatusStoreConfig>`.
 
 ### 7.3 `RedisStatusStore` (`@zdavison/matador-redis`)
 
@@ -254,6 +268,7 @@ A `Map` from `trackingId` to a `Map` from subscriber name to record. It implemen
   - `client`: a Redis client. The store uses a small client interface that matches `redis` v4 (`node-redis`). meetsone uses `redis` `^4.6.5`.
   - `ttlMs`: required. The store does not choose a retention period for the app.
   - `keyPrefix`: optional. Default: `matador:status:`.
+  - `maxRecordBytes` and `progressIntervalMs`: optional. The defaults come from `resolveStatusStoreConfig`.
 - `redis` is a peer dependency of the package. Core Matador has no Redis dependency.
 
 ### 7.4 `StatusTracker` (core, internal)
@@ -306,7 +321,7 @@ All errors extend `MatadorError` and have a `description`.
 | Error | Cause |
 |---|---|
 | `StatusStoreRequiredError` | A tracked subscriber or `getStatus` with no `statusStore` |
-| `RecordTooLargeError` | A record larger than `maxRecordBytes` |
+| `RecordTooLargeError` | A record larger than `store.config.maxRecordBytes` |
 | `ResultNotSerializableError` | A tracked callback returned a value that `JSON.stringify` cannot serialize |
 | `StatusStoreError` | The store threw during the first write in `send()`. Wraps the cause. |
 
