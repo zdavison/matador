@@ -77,6 +77,12 @@ export interface BaseSubscriberOptions {
 
   /** Feature flag function to conditionally enable/disable the subscriber */
   readonly enabled?: (() => boolean | Promise<boolean>) | undefined;
+
+  /**
+   * If true, Matador keeps a status record for each send to this subscriber.
+   * Requires a statusStore in the Matador config.
+   */
+  readonly track?: boolean | undefined;
 }
 
 /**
@@ -207,6 +213,7 @@ export interface CreateStandardSubscriberInput<T extends MatadorEvent> {
   readonly importance?: Importance | undefined;
   readonly targetQueue?: string | undefined;
   readonly enabled?: (() => boolean | Promise<boolean>) | undefined;
+  readonly track?: boolean | undefined;
 }
 
 /**
@@ -220,6 +227,7 @@ export interface CreateResumableSubscriberInput<T extends MatadorEvent> {
   readonly importance?: Importance | undefined;
   readonly targetQueue?: string | undefined;
   readonly enabled?: (() => boolean | Promise<boolean>) | undefined;
+  readonly track?: boolean | undefined;
 }
 
 /**
@@ -267,6 +275,7 @@ export function createSubscriber<T extends MatadorEvent>(
       targetQueue: input.targetQueue,
     }),
     ...(input.enabled !== undefined && { enabled: input.enabled }),
+    ...(input.track !== undefined && { track: input.track }),
   };
 
   if (input.idempotent === 'resumable') {
@@ -293,6 +302,7 @@ export interface CreateSubscriberStubInput {
   readonly importance?: Importance | undefined;
   readonly targetQueue?: string | undefined;
   readonly enabled?: (() => boolean | Promise<boolean>) | undefined;
+  readonly track?: boolean | undefined;
 }
 
 /**
@@ -318,6 +328,7 @@ export function createSubscriberStub(
       targetQueue: input.targetQueue,
     }),
     ...(input.enabled !== undefined && { enabled: input.enabled }),
+    ...(input.track !== undefined && { track: input.track }),
   };
 }
 
@@ -330,4 +341,5 @@ export interface SubscriberDefinition {
   readonly idempotent: Idempotency;
   readonly importance: Importance;
   readonly targetQueue?: string | undefined;
+  readonly track?: boolean | undefined;
 }
