@@ -3,7 +3,7 @@
   "private": false,
   "workspaces": ["packages/*", "examples/*"],
   "scripts": {
-    "build": "bun run --filter '@zdavison/matador' build && bun run --filter '@zdavison/matador-nest' build && bun run --filter 'matador-nest-example' build",
+    "build": "bun run --filter '@zdavison/matador' build && bun run --filter '@zdavison/matador-nest' build && bun run --filter '@zdavison/matador-redis' build && bun run --filter 'matador-nest-example' build",
     "test": "bun run --filter '*' test",
     "lint": "bunx biome check .",
     "lint:fix": "bunx biome check . --fix",
