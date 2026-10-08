@@ -1,4 +1,8 @@
-import type { Checkpoint, CheckpointStore } from '../checkpoint/index.js';
+import type {
+  Checkpoint,
+  CheckpointStore,
+  JsonSerializable,
+} from '../checkpoint/index.js';
 import { NoOpCheckpointStore, ResumableContext } from '../checkpoint/index.js';
 import type { Codec } from '../codec/index.js';
 import { CodecDecodeError } from '../codec/index.js';
@@ -209,7 +213,11 @@ export class ProcessingPipeline {
     }
 
     // Create base callback context with matador dispatcher
-    const callbackContext: CallbackContext = { matador: this.dispatcher };
+    const report = (_percent: number, _details?: JsonSerializable): void => {};
+    const callbackContext: CallbackContext = {
+      matador: this.dispatcher,
+      progress: report,
+    };
 
     await this.hooks.onWorkerWrap(envelope, subscriberDef, async () => {
       await this.hooks.onWorkerBeforeProcess(envelope, subscriberDef);
@@ -229,6 +237,7 @@ export class ProcessingPipeline {
             attempt: context.attempt,
             isRetry: context.isRetry,
             matador: this.dispatcher,
+            progress: report,
           };
           result = await resumableCallback(envelope, fullContext);
         } else {

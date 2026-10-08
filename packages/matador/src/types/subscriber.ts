@@ -1,4 +1,7 @@
-import type { SubscriberContext } from '../checkpoint/index.js';
+import type {
+  JsonSerializable,
+  SubscriberContext,
+} from '../checkpoint/index.js';
 import type { Idempotency, Importance } from './common.js';
 import type { Dispatcher } from './dispatcher.js';
 import type { Envelope } from './envelope.js';
@@ -11,6 +14,14 @@ import type { MatadorEvent } from './event.js';
 export interface CallbackContext {
   /** Matador dispatcher for sending additional events from within a subscriber */
   readonly matador: Dispatcher;
+
+  /**
+   * Report progress. Returns at once and does not wait for the store.
+   * Does nothing if the subscriber does not have track: true.
+   * @param percent - A number from 0 to 100. Values outside the range are clamped.
+   * @param details - Optional small JSON value, for example counters.
+   */
+  progress(percent: number, details?: JsonSerializable): void;
 }
 
 /**
