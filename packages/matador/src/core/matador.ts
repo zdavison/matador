@@ -176,6 +176,7 @@ export class Matador implements Dispatcher {
       hooks: this.hooks,
       checkpointStore: config.checkpointStore,
       dispatcher: this,
+      statusTracker: this.statusTracker,
     });
 
     // Create fanout engine

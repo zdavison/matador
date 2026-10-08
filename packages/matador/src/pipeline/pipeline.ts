@@ -13,6 +13,11 @@ import {
 import type { SafeHooks } from '../hooks/index.js';
 import type { RetryDecision, RetryPolicy } from '../retry/index.js';
 import type { SchemaRegistry } from '../schema/index.js';
+import {
+  type ProgressReporter,
+  type StatusTracker,
+  isTrackedEnvelope,
+} from '../status/index.js';
 import type { MessageReceipt, Transport } from '../transport/index.js';
 import type {
   CallbackContext,
@@ -36,6 +41,8 @@ export interface PipelineConfig {
   readonly checkpointStore?: CheckpointStore | undefined;
   /** Dispatcher (matador) for sending events from subscriber callbacks */
   readonly dispatcher: Dispatcher;
+  /** Status tracker. Set only if Matador has a statusStore. */
+  readonly statusTracker?: StatusTracker | undefined;
 }
 
 /**
@@ -69,9 +76,11 @@ export class ProcessingPipeline {
   private readonly hooks: SafeHooks;
   private readonly checkpointStore: CheckpointStore;
   private readonly dispatcher: Dispatcher;
+  private readonly statusTracker: StatusTracker | undefined;
 
   constructor(config: PipelineConfig) {
     this.transport = config.transport;
+    this.statusTracker = config.statusTracker;
     this.schema = config.schema;
     this.codec = config.codec;
     this.retryPolicy = config.retryPolicy;
@@ -213,7 +222,16 @@ export class ProcessingPipeline {
     }
 
     // Create base callback context with matador dispatcher
-    const report = (_percent: number, _details?: JsonSerializable): void => {};
+    // Status tracking: only for envelopes that fanout gave a tracking ID
+    const tracker =
+      this.statusTracker && isTrackedEnvelope(envelope)
+        ? this.statusTracker
+        : undefined;
+    const reporter = tracker?.startProgress(envelope);
+    const report = (percent: number, details?: JsonSerializable): void => {
+      reporter?.report(percent, details);
+    };
+    await tracker?.markActive(envelope);
     const callbackContext: CallbackContext = {
       matador: this.dispatcher,
       progress: report,
@@ -268,6 +286,7 @@ export class ProcessingPipeline {
       }
 
       await this.transport.complete(receipt);
+      await tracker?.markCompleted(envelope, result, reporter);
       await this.hooks.onWorkerSuccess({
         envelope,
         subscriber: subscriberDef,
@@ -300,6 +319,7 @@ export class ProcessingPipeline {
       isResumable,
       receipt,
       durationMs,
+      reporter,
     );
   }
 
@@ -362,6 +382,7 @@ export class ProcessingPipeline {
    * @param isResumable - Whether the subscriber is resumable
    * @param receipt - The message receipt
    * @param durationMs - The duration of processing
+   * @param reporter - The progress reporter of this delivery, if the envelope is tracked
    * @returns A `ProcessResult` indicating failure
    */
   private async handleFailure(
@@ -372,10 +393,16 @@ export class ProcessingPipeline {
     isResumable: boolean,
     receipt: MessageReceipt,
     durationMs: number,
+    reporter?: ProgressReporter,
   ): Promise<ProcessResult> {
     // Update envelope with error info
     envelope.docket.lastError = error.message;
     envelope.docket.firstError ??= error.message;
+
+    // Write retrying or failed before the retry publishes the next delivery
+    if (this.statusTracker && isTrackedEnvelope(envelope)) {
+      await this.statusTracker.markFailure(envelope, error, decision, reporter);
+    }
 
     // Clear checkpoint on dead-letter (terminal state)
     if (decision.action === 'dead-letter' && isResumable) {
