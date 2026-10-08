@@ -265,6 +265,60 @@ describe('status tracking: configuration and send', () => {
     expect(record?.error?.name).toBe('TransportSendError');
   });
 
+  it('puts the tracking ID on SomeSendError for a generated ID', async () => {
+    const store = new MemoryStatusStore();
+    matador = new Matador(
+      {
+        transport: new LocalTransport(silentLogger),
+        topology,
+        schema: { [JobEvent.key]: [JobEvent, [trackedRunner()]] },
+        statusStore: store,
+      },
+      { logger: silentLogger },
+    );
+    await matador.start();
+
+    let error: unknown;
+    try {
+      await matador.send(JobEvent, { userId: 'u-1' }, { buffer: false });
+    } catch (e) {
+      error = e;
+    }
+
+    expect(error).toBeInstanceOf(SomeSendError);
+    const trackingId = (error as SomeSendError).trackingId;
+    expect(typeof trackingId).toBe('string');
+    const records = await matador.getStatus(trackingId as string);
+    expect(records?.['job-runner']?.status).toBe('failed');
+  });
+
+  it('puts the caller tracking ID on SomeSendError (event instance path)', async () => {
+    const store = new MemoryStatusStore();
+    matador = new Matador(
+      {
+        transport: new LocalTransport(silentLogger),
+        topology,
+        schema: { [JobEvent.key]: [JobEvent, [trackedRunner()]] },
+        statusStore: store,
+      },
+      { logger: silentLogger },
+    );
+    await matador.start();
+
+    let error: unknown;
+    try {
+      await matador.send(new JobEvent({ userId: 'u-1' }), {
+        buffer: false,
+        trackingId: 'job-2',
+      });
+    } catch (e) {
+      error = e;
+    }
+
+    expect((error as SomeSendError).trackingId).toBe('job-2');
+    expect(await matador.getStatus('job-2')).toBeDefined();
+  });
+
   it('keeps a buffered send queued', async () => {
     const store = new MemoryStatusStore();
     matador = new Matador(

@@ -181,7 +181,8 @@ export class SomeSendError extends MatadorError {
   readonly description =
     'One or more subscriber messages could not be published during send(). ' +
     'ACTION: Inspect the `errors` array for per-failure details. ' +
-    'Each entry contains the subscriber name, target queue, and underlying error.';
+    'Each entry contains the subscriber name, target queue, and underlying error. ' +
+    'If the send had tracked subscribers, `trackingId` is set and getStatus() returns their records.';
 
   constructor(
     public readonly eventKey: string,
@@ -190,6 +191,7 @@ export class SomeSendError extends MatadorError {
       queue: string;
       error: Error;
     }>,
+    public readonly trackingId?: string | undefined,
   ) {
     const summary = errors
       .map((e) => `${e.subscriberName} (${e.queue}): ${e.error.message}`)

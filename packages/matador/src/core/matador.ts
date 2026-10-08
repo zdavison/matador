@@ -380,7 +380,11 @@ export class Matador implements Dispatcher {
       const event = new eventClass(data);
       const result = await this.fanout.send(eventClass, event, options);
       if (result.errors.length > 0)
-        throw new SomeSendError(result.eventKey, result.errors);
+        throw new SomeSendError(
+          result.eventKey,
+          result.errors,
+          result.trackingId,
+        );
       return result;
     }
     // Called as: send(event, options?)
@@ -389,7 +393,11 @@ export class Matador implements Dispatcher {
     const eventClass = event.constructor as EventClass<T>;
     const result = await this.fanout.send(eventClass, event, options);
     if (result.errors.length > 0)
-      throw new SomeSendError(result.eventKey, result.errors);
+      throw new SomeSendError(
+          result.eventKey,
+          result.errors,
+          result.trackingId,
+        );
     return result;
   }
 
