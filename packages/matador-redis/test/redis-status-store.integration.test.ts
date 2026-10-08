@@ -50,5 +50,15 @@ describe.skipIf(SKIP_E2E)('RedisStatusStore with a real Redis', () => {
 
     expect(ttl).toBeGreaterThan(0);
     expect(ttl).toBeLessThanOrEqual(60_000);
+
+    // Lower the TTL, write again, and check that the write refreshed it.
+    await client.pExpire(`matador:status:${trackingId}`, 1_000);
+    const lowered = await client.pTTL(`matador:status:${trackingId}`);
+    expect(lowered).toBeLessThanOrEqual(1_000);
+
+    await store.set(trackingId, 'runner', record);
+    const refreshed = await client.pTTL(`matador:status:${trackingId}`);
+    expect(refreshed).toBeGreaterThan(50_000);
+    expect(refreshed).toBeLessThanOrEqual(60_000);
   });
 });
