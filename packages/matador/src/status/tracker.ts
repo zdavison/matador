@@ -52,6 +52,25 @@ function toRecordError(error: Error): StatusRecordError {
   return { name: error.name, message: error.message };
 }
 
+/**
+ * Returns the last progress value of the reporter, or undefined if it
+ * cannot be serialized. Bad progress details must not block a terminal status.
+ */
+function serializableProgress(
+  reporter?: ProgressReporter,
+): StatusProgress | undefined {
+  const progress = reporter?.current;
+  if (progress === undefined) {
+    return undefined;
+  }
+  try {
+    JSON.stringify(progress);
+    return progress;
+  } catch {
+    return undefined;
+  }
+}
+
 function recordSize(record: StatusRecord): number {
   return new TextEncoder().encode(JSON.stringify(record)).byteLength;
 }
@@ -103,9 +122,15 @@ export class StatusTracker {
           this.store.set(w.trackingId, w.subscriberName, w.record),
         ),
       );
-    } catch (error) {
+    } catch (e) {
+      const error = toError(e);
       const trackingId = writes[0]?.trackingId ?? 'unknown';
-      throw new StatusStoreError('create', trackingId, toError(error));
+      await this.hooks.onStatusStoreError({
+        trackingId,
+        operation: 'create',
+        error,
+      });
+      throw new StatusStoreError('create', trackingId, error);
     }
   }
 
@@ -136,50 +161,54 @@ export class StatusTracker {
     result: unknown,
     reporter?: ProgressReporter,
   ): Promise<void> {
-    await reporter?.stop();
-    const progress = reporter?.current;
-    const trackingId = trackingIdOf(envelope);
-    const subscriberName = envelope.docket.targetSubscriber;
-
-    let json: JsonSerializable | undefined;
     try {
-      json = toJsonResult(result);
+      await reporter?.stop();
+      const progress = serializableProgress(reporter);
+
+      let json: JsonSerializable | undefined;
+      try {
+        json = toJsonResult(result);
+      } catch (error) {
+        const cause = new ResultNotSerializableError(
+          envelope.docket.targetSubscriber,
+          toError(error),
+        );
+        await this.write('update', envelope, 'failed', {
+          progress,
+          error: toRecordError(cause),
+        });
+        await this.reportError(envelope, 'update', cause);
+        return;
+      }
+
+      const record = this.buildRecord(envelope, 'completed', {
+        progress,
+        result: json,
+      });
+      const size = recordSize(record);
+      const maxBytes = this.store.config.maxRecordBytes;
+      if (size > maxBytes) {
+        const cause = new RecordTooLargeError(
+          trackingIdOf(envelope),
+          envelope.docket.targetSubscriber,
+          size,
+          maxBytes,
+        );
+        await this.write('update', envelope, 'failed', {
+          progress,
+          error: toRecordError(cause),
+        });
+        await this.reportError(envelope, 'update', cause);
+        return;
+      }
+
+      await this.write('update', envelope, 'completed', {
+        progress,
+        result: json,
+      });
     } catch (error) {
-      const cause = new ResultNotSerializableError(
-        subscriberName,
-        toError(error),
-      );
-      await this.write('update', envelope, 'failed', {
-        progress,
-        error: toRecordError(cause),
-      });
-      return;
+      await this.reportError(envelope, 'update', toError(error));
     }
-
-    const record = this.buildRecord(envelope, 'completed', {
-      progress,
-      result: json,
-    });
-    const size = recordSize(record);
-    const maxBytes = this.store.config.maxRecordBytes;
-    if (size > maxBytes) {
-      const cause = new RecordTooLargeError(
-        trackingId,
-        subscriberName,
-        size,
-        maxBytes,
-      );
-      await this.write('update', envelope, 'failed', {
-        progress,
-        error: toRecordError(cause),
-      });
-      return;
-    }
-
-    await this.write('update', envelope, 'completed', {
-      progress,
-      result: json,
-    });
   }
 
   async markFailure(
@@ -188,13 +217,17 @@ export class StatusTracker {
     decision: RetryDecision,
     reporter?: ProgressReporter,
   ): Promise<void> {
-    await reporter?.stop();
-    const status: TrackingStatus =
-      decision.action === 'retry' ? 'retrying' : 'failed';
-    await this.write('update', envelope, status, {
-      progress: reporter?.current,
-      error: toRecordError(error),
-    });
+    try {
+      await reporter?.stop();
+      const status: TrackingStatus =
+        decision.action === 'retry' ? 'retrying' : 'failed';
+      await this.write('update', envelope, status, {
+        progress: serializableProgress(reporter),
+        error: toRecordError(error),
+      });
+    } catch (e) {
+      await this.reportError(envelope, 'update', toError(e));
+    }
   }
 
   read(
@@ -254,6 +287,32 @@ export class StatusTracker {
   }
 
   /**
+   * Logs an error and passes it to the hook. Never throws.
+   */
+  private async reportError(
+    envelope: Envelope,
+    operation: 'update' | 'progress',
+    error: Error,
+  ): Promise<void> {
+    const trackingId = envelope.docket.trackingId ?? 'unknown';
+    const subscriberName = envelope.docket.targetSubscriber;
+    try {
+      this.hooks.logger.error(
+        `[Matador] 🔴 Status store ${operation} failed for tracking ID '${trackingId}'.`,
+        error,
+      );
+    } catch {
+      // A logger problem must not change message handling.
+    }
+    await this.hooks.onStatusStoreError({
+      trackingId,
+      subscriberName,
+      operation,
+      error,
+    });
+  }
+
+  /**
    * Writes a record after the send. Never throws: a status store problem
    * must not change message handling.
    */
@@ -263,48 +322,38 @@ export class StatusTracker {
     status: TrackingStatus,
     fields: RecordFields,
   ): Promise<void> {
-    const trackingId = trackingIdOf(envelope);
-    const subscriberName = envelope.docket.targetSubscriber;
-    const record = this.buildRecord(envelope, status, fields);
+    try {
+      const trackingId = trackingIdOf(envelope);
+      const subscriberName = envelope.docket.targetSubscriber;
+      const record = this.buildRecord(envelope, status, fields);
 
-    const size = recordSize(record);
-    const maxBytes = this.store.config.maxRecordBytes;
-    if (size > maxBytes) {
-      const error = new RecordTooLargeError(
-        trackingId,
-        subscriberName,
-        size,
-        maxBytes,
-      );
-      if (operation === 'progress') {
-        this.hooks.logger.warn(
-          `[Matador] 🟡 Dropped a progress value for tracking ID '${trackingId}'. ${error.message}`,
+      const size = recordSize(record);
+      const maxBytes = this.store.config.maxRecordBytes;
+      if (size > maxBytes) {
+        const error = new RecordTooLargeError(
+          trackingId,
+          subscriberName,
+          size,
+          maxBytes,
         );
+        if (operation === 'progress') {
+          this.hooks.logger.warn(
+            `[Matador] 🟡 Dropped a progress value for tracking ID '${trackingId}'. ${error.message}`,
+          );
+          return;
+        }
+        await this.hooks.onStatusStoreError({
+          trackingId,
+          subscriberName,
+          operation,
+          error,
+        });
         return;
       }
-      await this.hooks.onStatusStoreError({
-        trackingId,
-        subscriberName,
-        operation,
-        error,
-      });
-      return;
-    }
 
-    try {
       await this.store.set(trackingId, subscriberName, record);
     } catch (e) {
-      const error = toError(e);
-      this.hooks.logger.error(
-        `[Matador] 🔴 Status store ${operation} failed for tracking ID '${trackingId}'.`,
-        error,
-      );
-      await this.hooks.onStatusStoreError({
-        trackingId,
-        subscriberName,
-        operation,
-        error,
-      });
+      await this.reportError(envelope, operation, toError(e));
     }
   }
 }

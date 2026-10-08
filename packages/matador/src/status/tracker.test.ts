@@ -254,6 +254,87 @@ describe('StatusTracker', () => {
     });
   });
 
+  describe('never throws', () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    it('markCompleted leaves out progress that cannot be serialized', async () => {
+      const { store, tracker } = setup();
+      const envelope = envelopeFor('a');
+      const reporter = tracker.startProgress(envelope);
+      reporter.report(10, circular);
+      await tracker.markCompleted(envelope, { ok: true }, reporter);
+      const record = await store.get('t-1', 'a');
+      expect(record?.status).toBe('completed');
+      expect(record && 'progress' in record).toBe(false);
+    });
+
+    it('markFailure leaves out progress that cannot be serialized', async () => {
+      const { store, tracker } = setup();
+      const envelope = envelopeFor('a');
+      const reporter = tracker.startProgress(envelope);
+      reporter.report(10, circular);
+      await tracker.markFailure(
+        envelope,
+        new Error('x'),
+        { action: 'retry', delay: 1 },
+        reporter,
+      );
+      const record = await store.get('t-1', 'a');
+      expect(record?.status).toBe('retrying');
+      expect(record && 'progress' in record).toBe(false);
+    });
+
+    it('a progress report with unserializable details calls the hook', async () => {
+      const { store, tracker, onStatusStoreError } = setup();
+      const envelope = envelopeFor('a');
+      await tracker.markActive(envelope);
+      const reporter = tracker.startProgress(envelope);
+      reporter.report(10, circular);
+      await settle();
+      await reporter.stop();
+      expect((await store.get('t-1', 'a'))?.progress).toBeUndefined();
+      expect(onStatusStoreError).toHaveBeenCalledTimes(1);
+      expect(onStatusStoreError.mock.calls[0]?.[0]).toMatchObject({
+        operation: 'progress',
+      });
+    });
+
+    it('createQueued calls the hook with operation create and still rejects', async () => {
+      const { tracker, onStatusStoreError } = setup(new FailingStore());
+      await expect(
+        tracker.createQueued([envelopeFor('a')]),
+      ).rejects.toMatchObject({
+        name: 'StatusStoreError',
+      });
+      expect(onStatusStoreError).toHaveBeenCalledTimes(1);
+      expect(onStatusStoreError.mock.calls[0]?.[0]).toMatchObject({
+        operation: 'create',
+        trackingId: 't-1',
+      });
+    });
+
+    it('markCompleted calls the hook once for a too-large result', async () => {
+      const { tracker, onStatusStoreError } = setup(
+        new MemoryStatusStore({ maxRecordBytes: 2048 }),
+      );
+      await tracker.markCompleted(envelopeFor('a'), { text: 'x'.repeat(4000) });
+      expect(onStatusStoreError).toHaveBeenCalledTimes(1);
+      expect(onStatusStoreError.mock.calls[0]?.[0].error.name).toBe(
+        'RecordTooLargeError',
+      );
+    });
+
+    it('markCompleted calls the hook once for a BigInt result', async () => {
+      const { tracker, onStatusStoreError } = setup();
+      await tracker.markCompleted(envelopeFor('a'), 10n);
+      expect(onStatusStoreError).toHaveBeenCalledTimes(1);
+      expect(onStatusStoreError.mock.calls[0]?.[0].error.name).toBe(
+        'ResultNotSerializableError',
+      );
+    });
+  });
+
   describe('read', () => {
     it('reads all records or one record', async () => {
       const { tracker } = setup();
