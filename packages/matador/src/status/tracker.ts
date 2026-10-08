@@ -48,8 +48,42 @@ function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
 
+/**
+ * Maximum length of an error string in a stored record.
+ * A long error text must not make a terminal record too large.
+ */
+export const MAX_RECORD_ERROR_LENGTH = 1024;
+
+function bound(text: string): string {
+  return text.length > MAX_RECORD_ERROR_LENGTH
+    ? text.slice(0, MAX_RECORD_ERROR_LENGTH)
+    : text;
+}
+
 function toRecordError(error: Error): StatusRecordError {
-  return { name: error.name, message: error.message };
+  return { name: error.name, message: bound(error.message) };
+}
+
+/**
+ * Copies the envelope for storage with bounded error strings.
+ * The live envelope that the pipeline uses is not changed.
+ */
+function boundedEnvelope(envelope: Envelope): Envelope {
+  const { firstError, lastError } = envelope.docket;
+  if (
+    (firstError === undefined || firstError.length <= MAX_RECORD_ERROR_LENGTH) &&
+    (lastError === undefined || lastError.length <= MAX_RECORD_ERROR_LENGTH)
+  ) {
+    return envelope;
+  }
+  return {
+    ...envelope,
+    docket: {
+      ...envelope.docket,
+      ...(firstError !== undefined && { firstError: bound(firstError) }),
+      ...(lastError !== undefined && { lastError: bound(lastError) }),
+    },
+  };
 }
 
 /**
@@ -269,7 +303,7 @@ export class StatusTracker {
       ...(fields.progress !== undefined && { progress: fields.progress }),
       ...(fields.result !== undefined && { result: fields.result }),
       ...(fields.error !== undefined && { error: fields.error }),
-      envelope,
+      envelope: boundedEnvelope(envelope),
       updatedAt: new Date().toISOString(),
     };
   }
@@ -325,10 +359,16 @@ export class StatusTracker {
     try {
       const trackingId = trackingIdOf(envelope);
       const subscriberName = envelope.docket.targetSubscriber;
-      const record = this.buildRecord(envelope, status, fields);
-
-      const size = recordSize(record);
+      let record = this.buildRecord(envelope, status, fields);
       const maxBytes = this.store.config.maxRecordBytes;
+      let size = recordSize(record);
+
+      if (size > maxBytes && operation === 'update') {
+        // Keep the status change. Leave out the optional large fields once.
+        record = this.buildRecord(envelope, status, { error: fields.error });
+        size = recordSize(record);
+      }
+
       if (size > maxBytes) {
         const error = new RecordTooLargeError(
           trackingId,
@@ -342,12 +382,7 @@ export class StatusTracker {
           );
           return;
         }
-        await this.hooks.onStatusStoreError({
-          trackingId,
-          subscriberName,
-          operation,
-          error,
-        });
+        await this.reportError(envelope, operation, error);
         return;
       }
 

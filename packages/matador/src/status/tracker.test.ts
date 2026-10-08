@@ -201,6 +201,63 @@ describe('StatusTracker', () => {
       expect((await store.get('t-dc', 'a'))?.error?.message).toBe('gone');
     });
 
+    it('markFailure bounds a long error and still writes retrying', async () => {
+      const { store, tracker } = setup();
+      const envelope = envelopeFor('a');
+      const long = 'e'.repeat(30_000);
+      envelope.docket.lastError = long;
+      await tracker.markFailure(envelope, new Error(long), {
+        action: 'retry',
+        delay: 100,
+      });
+      const record = await store.get('t-1', 'a');
+      expect(record?.status).toBe('retrying');
+      expect(record?.error?.message.length).toBe(1024);
+      expect(record?.envelope.docket.lastError?.length).toBe(1024);
+      expect(envelope.docket.lastError).toBe(long);
+    });
+
+    it('markFailure writes the terminal status without progress when only the progress is too large', async () => {
+      const { store, tracker, onStatusStoreError } = setup(
+        new MemoryStatusStore({ maxRecordBytes: 4000, progressIntervalMs: 0 }),
+      );
+      const envelope = envelopeFor('a');
+      const reporter = tracker.startProgress(envelope);
+      reporter.report(50, { blob: 'x'.repeat(5000) });
+      await tracker.markFailure(
+        envelope,
+        new Error('boom'),
+        { action: 'dead-letter', queue: 'undeliverable', reason: 'boom' },
+        reporter,
+      );
+      const record = await store.get('t-1', 'a');
+      expect(record?.status).toBe('failed');
+      expect(record && 'progress' in record).toBe(false);
+      expect(onStatusStoreError).not.toHaveBeenCalled();
+    });
+
+    it('markFailure logs and calls the hook if the record is still too large', async () => {
+      const error = mock((_message: string, ..._args: unknown[]) => {});
+      const onStatusStoreError = mock(
+        (_context: StatusStoreErrorContext) => {},
+      );
+      const store = new MemoryStatusStore({ maxRecordBytes: 50 });
+      const tracker = new StatusTracker(
+        store,
+        new SafeHooks({
+          logger: { ...silentLogger, error },
+          onStatusStoreError,
+        }),
+      );
+      await tracker.markFailure(envelopeFor('a'), new Error('boom'), {
+        action: 'retry',
+        delay: 1,
+      });
+      expect(await store.get('t-1', 'a')).toBeUndefined();
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(onStatusStoreError).toHaveBeenCalledTimes(1);
+    });
+
     it('markPublishFailed writes failed with the publish error', async () => {
       const { store, tracker } = setup();
       await tracker.markPublishFailed(
