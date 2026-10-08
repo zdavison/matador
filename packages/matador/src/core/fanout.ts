@@ -1,6 +1,10 @@
-import { TransportSendError } from '../errors/index.js';
+import {
+  StatusStoreRequiredError,
+  TransportSendError,
+} from '../errors/index.js';
 import type { SafeHooks } from '../hooks/index.js';
 import type { SchemaRegistry } from '../schema/index.js';
+import { type StatusTracker, isTrackedEnvelope } from '../status/index.js';
 import type { Topology } from '../topology/index.js';
 import { resolveTargetQueueName } from '../topology/index.js';
 import type { SendOptions, Transport } from '../transport/index.js';
@@ -73,6 +77,9 @@ export interface FanoutConfig {
    * always attempt every buffered message on every flush pass.
    */
   readonly maxConsecutiveFlushFailures?: number | undefined;
+
+  /** Status tracker. Set only if Matador has a statusStore. */
+  readonly statusTracker?: StatusTracker | undefined;
 }
 
 /**
@@ -83,6 +90,8 @@ export interface SendResult {
   readonly subscribersSent: number;
   readonly subscribersSkipped: number;
   readonly errors: readonly SendError[];
+  /** Set only if the send has one or more tracked subscribers. */
+  readonly trackingId?: string | undefined;
 }
 
 /**
@@ -109,6 +118,7 @@ export class FanoutEngine {
   private readonly hooks: SafeHooks;
   private readonly topology: Topology;
   private readonly defaultQueue: string;
+  private readonly statusTracker: StatusTracker | undefined;
   private enqueuingCount = 0;
   private flushInFlightCount = 0;
   private readonly retryBuffer: BufferedSend[] = [];
@@ -124,6 +134,7 @@ export class FanoutEngine {
     this.hooks = config.hooks;
     this.topology = config.topology;
     this.defaultQueue = config.defaultQueue;
+    this.statusTracker = config.statusTracker;
     this.maxRetryBufferSize = config.maxRetryBufferSize ?? 5000;
     this.maxRetryAttempts = config.maxRetryAttempts;
     const maxConsecutiveFlushFailures =
@@ -189,19 +200,31 @@ export class FanoutEngine {
         ? { ...event.metadata, ...options.metadata }
         : undefined;
 
+    // 1. Resolve the enabled subscribers
+    const targets: AnySubscriber[] = [];
     for (const subscriber of subscribers) {
-      // Check if subscriber is enabled
-      const enabled = await this.isSubscriberEnabled(subscriber);
-      if (!enabled) {
+      if (await this.isSubscriberEnabled(subscriber)) {
+        targets.push(subscriber);
+      } else {
         skipped++;
-        continue;
       }
+    }
 
-      // Determine target queue
+    // 2. One tracking ID for all tracked subscribers of this send
+    const hasTracked = targets.some((s) => s.track === true);
+    if (hasTracked && !this.statusTracker) {
+      throw new StatusStoreRequiredError(
+        `event '${eventKey}' has a subscriber with track: true`,
+      );
+    }
+    const trackingId = hasTracked
+      ? (options.trackingId ?? crypto.randomUUID())
+      : undefined;
+
+    // 3. Build the envelopes
+    const prepared = targets.map((subscriber) => {
       const targetQueue = subscriber.targetQueue ?? this.defaultQueue;
       const qualifiedQueue = resolveTargetQueueName(this.topology, targetQueue);
-
-      // Create envelope
       const envelope = createEnvelope({
         eventKey,
         eventDescription: eventClass.description,
@@ -209,11 +232,24 @@ export class FanoutEngine {
         data: event.data,
         importance: subscriber.importance ?? 'should-investigate',
         correlationId: options.correlationId,
+        trackingId: subscriber.track === true ? trackingId : undefined,
         metadata: mergedMetadata,
         universalMetadata,
         delayMs: options.delayMs,
       });
+      return { subscriber, qualifiedQueue, envelope };
+    });
 
+    // 4. Write the queued records before any publish
+    if (this.statusTracker) {
+      const tracked = prepared.map((p) => p.envelope).filter(isTrackedEnvelope);
+      if (tracked.length > 0) {
+        await this.statusTracker.createQueued(tracked);
+      }
+    }
+
+    // 5. Publish
+    for (const { subscriber, qualifiedQueue, envelope } of prepared) {
       // Send to transport
       const sendOptions: SendOptions | undefined =
         options.delayMs !== undefined ? { delay: options.delayMs } : undefined;
@@ -286,6 +322,7 @@ export class FanoutEngine {
             error: err,
             transport: this.transport.name,
           });
+          await this.markPublishFailed(envelope, err);
         }
       } finally {
         this.enqueuingCount--;
@@ -297,6 +334,7 @@ export class FanoutEngine {
       subscribersSent: sent,
       subscribersSkipped: skipped,
       errors,
+      ...(trackingId !== undefined && { trackingId }),
     };
   }
 
@@ -431,6 +469,7 @@ export class FanoutEngine {
         error: err,
         transport: this.transport.name,
       });
+      await this.markPublishFailed(item.envelope, err);
     }
   }
 
@@ -470,6 +509,19 @@ export class FanoutEngine {
       error: err,
       transport: this.transport.name,
     });
+    await this.markPublishFailed(item.envelope, err);
+  }
+
+  /**
+   * Marks a tracked envelope failed when Matador gives up on its publish.
+   */
+  private async markPublishFailed(
+    envelope: Envelope,
+    error: Error,
+  ): Promise<void> {
+    if (this.statusTracker && isTrackedEnvelope(envelope)) {
+      await this.statusTracker.markPublishFailed(envelope, error);
+    }
   }
 
   private async isSubscriberEnabled(

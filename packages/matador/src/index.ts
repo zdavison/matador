@@ -15,6 +15,22 @@ export {
   ShutdownManager,
 } from './core/index.js';
 
+// Status
+export type {
+  StatusProgress,
+  StatusRecord,
+  StatusRecordError,
+  StatusStore,
+  StatusStoreConfig,
+  TrackingStatus,
+} from './status/index.js';
+export {
+  DEFAULT_MAX_RECORD_BYTES,
+  DEFAULT_PROGRESS_INTERVAL_MS,
+  MemoryStatusStore,
+  resolveStatusStoreConfig,
+} from './status/index.js';
+
 // Types
 export type {
   AnySubscriber,
@@ -163,6 +179,7 @@ export type {
   EnqueueSuccessContext,
   Logger,
   MatadorHooks,
+  StatusStoreErrorContext,
   WorkerErrorContext,
   WorkerExecuteFn,
   WorkerSuccessContext,
@@ -174,7 +191,7 @@ export type { PipelineConfig, ProcessResult } from './pipeline/index.js';
 export { ProcessingPipeline } from './pipeline/index.js';
 
 // Errors
-export type { HasDescription } from './errors/index.js';
+export type { HasDescription, StatusStoreOperation } from './errors/index.js';
 export {
   // Retry control errors
   assertEvent,
@@ -222,6 +239,11 @@ export {
   isIdempotentMessageCannotRetryError,
   // Timeout errors
   TimeoutError,
+  // Status errors
+  RecordTooLargeError,
+  ResultNotSerializableError,
+  StatusStoreError,
+  StatusStoreRequiredError,
   // Utility
   hasDescription,
 } from './errors/index.js';

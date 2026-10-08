@@ -6,6 +6,7 @@ import {
   NotStartedError,
   ShutdownInProgressError,
   SomeSendError,
+  StatusStoreRequiredError,
 } from '../errors/index.js';
 import type { MatadorHooks } from '../hooks/index.js';
 import { SafeHooks } from '../hooks/index.js';
@@ -14,6 +15,11 @@ import type { RetryPolicy } from '../retry/index.js';
 import { StandardRetryPolicy } from '../retry/index.js';
 import type { MatadorSchema } from '../schema/index.js';
 import { SchemaRegistry, isSchemaEntryTuple } from '../schema/index.js';
+import {
+  type StatusRecord,
+  type StatusStore,
+  StatusTracker,
+} from '../status/index.js';
 import type { Topology } from '../topology/index.js';
 import {
   findQueueDefinition,
@@ -64,6 +70,14 @@ export interface MatadorConfig {
    * won't persist across retries.
    */
   readonly checkpointStore?: CheckpointStore | undefined;
+
+  /**
+   * Status store for subscribers with track: true.
+   * Required if the schema has a tracked subscriber. Every process that sends to
+   * or consumes a tracked subscriber needs a store that points to the same data.
+   * The store owns its settings (maxRecordBytes, progressIntervalMs).
+   */
+  readonly statusStore?: StatusStore | undefined;
 
   /**
    * Maximum number of in-memory buffered sends held for retry when the
@@ -124,6 +138,7 @@ export class Matador implements Dispatcher {
   private readonly fanout;
   private readonly shutdownManager;
   private readonly consumeFrom: readonly string[];
+  private readonly statusTracker: StatusTracker | undefined;
   private readonly subscriptions: Subscription[] = [];
   private started = false;
 
@@ -144,6 +159,10 @@ export class Matador implements Dispatcher {
     this.codec = config.codec ?? new JsonCodec();
     this.retryPolicy = config.retryPolicy ?? new StandardRetryPolicy();
     this.hooks = new SafeHooks(hooks);
+
+    this.statusTracker = config.statusStore
+      ? new StatusTracker(config.statusStore, this.hooks)
+      : undefined;
 
     // Register schema from config
     this.registerSchema(config.schema);
@@ -171,6 +190,7 @@ export class Matador implements Dispatcher {
       maxRetryAttempts: config.maxRetryAttempts,
       retryIntervalMs: config.retryIntervalMs,
       maxConsecutiveFlushFailures: config.maxConsecutiveFlushFailures,
+      statusTracker: this.statusTracker,
     });
 
     // Create shutdown manager
@@ -189,6 +209,7 @@ export class Matador implements Dispatcher {
     eventClass: EventClass<T>,
     subscribers: readonly AnySubscriber[],
   ): this {
+    this.assertTrackingSupported(subscribers);
     this.schema.register(eventClass, subscribers);
     return this;
   }
@@ -216,13 +237,30 @@ export class Matador implements Dispatcher {
       if (isSchemaEntryTuple(entry)) {
         // Tuple format: [EventClass, Subscriber[]]
         const [eventClass, subscribers] = entry;
+        this.assertTrackingSupported(subscribers);
         this.schema.register(eventClass, subscribers);
       } else {
         // Object format: { eventClass, subscribers }
+        this.assertTrackingSupported(entry.subscribers);
         this.schema.register(entry.eventClass, entry.subscribers);
       }
     }
     return this;
+  }
+
+  /**
+   * Throws if a subscriber has track: true and Matador has no status store.
+   */
+  private assertTrackingSupported(subscribers: readonly AnySubscriber[]): void {
+    if (this.statusTracker) {
+      return;
+    }
+    const tracked = subscribers.find((s) => s.track === true);
+    if (tracked) {
+      throw new StatusStoreRequiredError(
+        `subscriber '${tracked.name}' has track: true`,
+      );
+    }
   }
 
   /**
@@ -352,6 +390,37 @@ export class Matador implements Dispatcher {
     if (result.errors.length > 0)
       throw new SomeSendError(result.eventKey, result.errors);
     return result;
+  }
+
+  /**
+   * Reads the status records of a tracked send.
+   *
+   * @param trackingId - The tracking ID from SendResult.trackingId or from EventOptions.trackingId
+   * @returns A map from subscriber name to record, or undefined if no record exists
+   * @throws StatusStoreRequiredError if Matador has no statusStore
+   */
+  getStatus(
+    trackingId: string,
+  ): Promise<Readonly<Record<string, StatusRecord>> | undefined>;
+  /**
+   * Reads the status record of one tracked subscriber.
+   */
+  getStatus(
+    trackingId: string,
+    subscriberName: string,
+  ): Promise<StatusRecord | undefined>;
+  async getStatus(
+    trackingId: string,
+    subscriberName?: string,
+  ): Promise<
+    Readonly<Record<string, StatusRecord>> | StatusRecord | undefined
+  > {
+    if (!this.statusTracker) {
+      throw new StatusStoreRequiredError('getStatus() was called');
+    }
+    return subscriberName === undefined
+      ? this.statusTracker.read(trackingId)
+      : this.statusTracker.read(trackingId, subscriberName);
   }
 
   /**
