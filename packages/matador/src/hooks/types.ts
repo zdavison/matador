@@ -4,6 +4,7 @@ import type {
   CheckpointLoadedContext,
   CheckpointMissContext,
 } from '../checkpoint/index.js';
+import type { StatusStoreOperation } from '../errors/index.js';
 import type { RetryDecision } from '../retry/index.js';
 import type { ConnectionState, Transport } from '../transport/index.js';
 import type { Envelope, SubscriberDefinition } from '../types/index.js';
@@ -98,6 +99,17 @@ export interface WorkerErrorContext {
   readonly decision: RetryDecision;
   /** The transport that received the message (e.g., 'local', 'rabbitmq') */
   readonly transport: string;
+}
+
+/**
+ * Context for the status store error hook.
+ */
+export interface StatusStoreErrorContext {
+  readonly trackingId: string;
+  /** Not set for a read of all records of a tracking ID */
+  readonly subscriberName?: string | undefined;
+  readonly operation: StatusStoreOperation;
+  readonly error: Error;
 }
 
 /**
@@ -223,4 +235,12 @@ export interface MatadorHooks {
    * Fires on successful completion or when moving to dead-letter queue.
    */
   onCheckpointCleared?(context: CheckpointClearedContext): void | Promise<void>;
+
+  // === Status Hooks (Tracked Subscribers) ===
+
+  /**
+   * Called when a status store write or read fails, or when a record is too large.
+   * Message handling does not change: the status record is for observation only.
+   */
+  onStatusStoreError?(context: StatusStoreErrorContext): void | Promise<void>;
 }
