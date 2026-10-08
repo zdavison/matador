@@ -55,6 +55,13 @@ export interface EventOptions {
   readonly correlationId?: string | undefined;
 
   /**
+   * ID for the status records of this send.
+   * Used only if the event has a subscriber with track: true.
+   * If not set, Matador makes a UUID v4. The caller makes sure that a given ID is unique.
+   */
+  readonly trackingId?: string | undefined;
+
+  /**
    * Event-specific metadata to include in the docket.
    * This metadata will be merged with:
    * 1. Event instance metadata (if defined on the event)

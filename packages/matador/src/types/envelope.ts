@@ -63,6 +63,12 @@ export interface Docket {
   readonly correlationId?: string | undefined;
 
   /**
+   * Tracking ID for status records. Set only on envelopes for subscribers with track: true.
+   * One send has one tracking ID for all of its tracked subscribers.
+   */
+  readonly trackingId?: string | undefined;
+
+  /**
    * Custom metadata provided by the application.
    * This is the merged result of universal metadata (from loadUniversalMetadata hook)
    * and event-specific metadata (from dispatch options). Event-specific metadata
@@ -81,6 +87,7 @@ type DocketCreateFields = Pick<
   | 'targetSubscriber'
   | 'importance'
   | 'correlationId'
+  | 'trackingId'
 >;
 
 /**
@@ -146,6 +153,9 @@ export function createEnvelope<T>(
       importance: options.importance,
       ...(options.correlationId !== undefined && {
         correlationId: options.correlationId,
+      }),
+      ...(options.trackingId !== undefined && {
+        trackingId: options.trackingId,
       }),
       ...(mergedMetadata !== undefined && { metadata: mergedMetadata }),
     },

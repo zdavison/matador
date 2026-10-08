@@ -12,6 +12,7 @@ import {
   type EnqueueSuccessContext,
   type Logger,
   type MatadorHooks,
+  type StatusStoreErrorContext,
   type WorkerErrorContext,
   type WorkerExecuteFn,
   type WorkerSuccessContext,
@@ -184,6 +185,12 @@ export class SafeHooks {
   async onCheckpointCleared(context: CheckpointClearedContext): Promise<void> {
     await this.safeCall('onCheckpointCleared', () =>
       this.hooks.onCheckpointCleared?.(context),
+    );
+  }
+
+  async onStatusStoreError(context: StatusStoreErrorContext): Promise<void> {
+    await this.safeCall('onStatusStoreError', () =>
+      this.hooks.onStatusStoreError?.(context),
     );
   }
 

@@ -21,6 +21,7 @@ const HEADERS = {
   // Observability
   IMPORTANCE: 'x-matador-importance',
   CORRELATION_ID: 'x-matador-correlation-id',
+  TRACKING_ID: 'x-matador-tracking-id',
 
   // v1 compatibility headers
   V1_EVENT_ID: 'x-event-id',
@@ -108,6 +109,9 @@ export class RabbitMQCodec implements HeaderAwareCodec {
     if (docket.correlationId !== undefined) {
       headers[HEADERS.CORRELATION_ID] = docket.correlationId;
     }
+    if (docket.trackingId !== undefined) {
+      headers[HEADERS.TRACKING_ID] = docket.trackingId;
+    }
 
     return {
       body: new TextEncoder().encode(JSON.stringify(body)),
@@ -193,6 +197,7 @@ export class RabbitMQCodec implements HeaderAwareCodec {
       headers,
       HEADERS.CORRELATION_ID,
     );
+    const trackingId = this.optionalStringHeader(headers, HEADERS.TRACKING_ID);
 
     const docket: Docket = {
       // Routing
@@ -208,6 +213,7 @@ export class RabbitMQCodec implements HeaderAwareCodec {
       // Observability
       importance: importance as Docket['importance'],
       ...(correlationId !== undefined && { correlationId }),
+      ...(trackingId !== undefined && { trackingId }),
       ...(body.metadata !== undefined && { metadata: body.metadata }),
     };
 

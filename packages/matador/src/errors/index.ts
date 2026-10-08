@@ -59,3 +59,12 @@ export {
   isCheckpointStoreError,
   isDuplicateIoKeyError,
 } from './checkpoint-errors.js';
+
+export type { StatusStoreOperation } from './status-errors.js';
+export {
+  // Status errors
+  RecordTooLargeError,
+  ResultNotSerializableError,
+  StatusStoreError,
+  StatusStoreRequiredError,
+} from './status-errors.js';

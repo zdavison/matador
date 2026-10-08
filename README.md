@@ -29,6 +29,7 @@ An opinionated, batteries-included framework for using event transports (e.g. `R
   - [Hooks](#hooks)
   - [idempotent](#idempotent)
   - [ResumableSubscriber](#resumablesubscriber)
+  - [Status tracking](#status-tracking)
   - [Ordering and concurrency guarantees](#ordering-and-concurrency-guarantees)
   - [Single active consumer (RabbitMQ)](#single-active-consumer-rabbitmq)
 - [Why it works this way](#why-it-works-this-way)
@@ -484,6 +485,7 @@ Hooks are passed as the second argument to the `Matador` constructor and provide
 | `onWorkerSuccess`        | Called after successful processing                                                    |
 | `onWorkerError`          | Called after processing error                                                         |
 | `onDecodeError`          | Called when message decoding fails                                                    |
+| `onStatusStoreError`     | Called when a status store call fails (see [Status tracking](#status-tracking))       |
 | `onConnectionStateChange`| Called when transport connection state changes                                        |
 
 **Dynamic Configuration Hooks:**
@@ -602,6 +604,51 @@ const enrichUserData: Subscriber<UserCreatedEvent> = {
 ```
 
 Each `io()` key must be unique within the subscriber and stable across retries. Use descriptive names like `'fetch-user'`, `'send-email'`, or `'charge-payment'`.
+
+### Status tracking
+
+RabbitMQ cannot give the status of one message. Matador can keep the status in a pluggable store, so that an app can poll the status, the progress and the result of a job.
+
+1. Give Matador a store. Use `MemoryStatusStore` in tests, and `RedisStatusStore` from `@zdavison/matador-redis` in production.
+2. Set `track: true` on the subscriber.
+3. Read the `trackingId` from the send result, or give your own.
+4. Poll with `matador.getStatus(trackingId)`.
+
+```typescript
+const matador = new Matador({ transport, topology, schema, statusStore: new MemoryStatusStore() });
+
+const ocr = createSubscriber<OcrRequestedEvent>({
+  name: 'ocr',
+  description: 'Runs OCR on an uploaded file',
+  track: true,
+  callback: async (envelope, ctx) => {
+    ctx.progress(10);
+    const markdown = await runOcr(envelope.data.fileKey);
+    const resultKey = await uploadToS3(markdown);
+    ctx.progress(100);
+    return { resultKey }; // The return value is the result. Keep it small.
+  },
+});
+
+const { trackingId } = await matador.send(OcrRequestedEvent, { fileKey, userId });
+const record = await matador.getStatus(trackingId!, 'ocr');
+// record.status: 'queued' | 'active' | 'retrying' | 'completed' | 'failed'
+// record.progress, record.result, record.error, record.envelope
+```
+
+Rules:
+
+- The record holds the whole envelope. Check access in your app, for example compare `record.envelope.data.userId` with the current user.
+- The store limits each record to `maxRecordBytes` (default 64 KB). Write large data, for example files, to blob storage and return a pointer.
+- `ctx.progress()` returns at once. The store writes the latest value at most once in each `progressIntervalMs` (default 1000 ms).
+- A store failure after the send does not change message handling. Matador calls the `onStatusStoreError` hook.
+- Each process that sends or consumes a tracked subscriber needs a store that points to the same data. The dispatcher and the consumer must share the data.
+- A `discard` retry decision gives the status `failed`.
+- A buffered send stays `queued` until Matador publishes the message.
+- `SendResult.trackingId` is `undefined` if no subscriber of the event is tracked.
+- If a publish fails, `send()` throws `SomeSendError`. The error has the `trackingId`, so you can still read the records.
+- For Redis, create the client with `disableOfflineQueue: true` and a `socket.connectTimeout`. See the [`@zdavison/matador-redis` README](packages/matador-redis/README.md).
+- v1 has no atomic writes. If two processes handle the same message, the record can show the wrong final status.
 
 ### Ordering and concurrency guarantees
 

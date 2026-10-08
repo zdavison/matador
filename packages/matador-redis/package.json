@@ -1,0 +1,50 @@
+{
+  "name": "@zdavison/matador-redis",
+  "version": "4.2.0",
+  "description": "Redis status store for the Matador event processing library",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "scripts": {
+    "build": "rm -rf dist *.tsbuildinfo && tsup && tsc --build && cp dist/index.d.ts dist/index.d.cts",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "lint": "bunx biome check .",
+    "lint:fix": "bunx biome check . --fix",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "peerDependencies": {
+    "@zdavison/matador": "^4.2.0"
+  },
+  "devDependencies": {
+    "@testcontainers/redis": "^10.16.0",
+    "@zdavison/matador": "4.2.0",
+    "redis": "^4.6.5",
+    "testcontainers": "^10.16.0",
+    "tsup": "^8.3.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["matador", "redis", "status", "events", "queue"],
+  "license": "MIT",
+  "files": ["dist"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/meetsmore/matador.git"
+  }
+}

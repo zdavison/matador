@@ -1,4 +1,7 @@
-import type { SubscriberContext } from '../checkpoint/index.js';
+import type {
+  JsonSerializable,
+  SubscriberContext,
+} from '../checkpoint/index.js';
 import type { Idempotency, Importance } from './common.js';
 import type { Dispatcher } from './dispatcher.js';
 import type { Envelope } from './envelope.js';
@@ -11,6 +14,14 @@ import type { MatadorEvent } from './event.js';
 export interface CallbackContext {
   /** Matador dispatcher for sending additional events from within a subscriber */
   readonly matador: Dispatcher;
+
+  /**
+   * Report progress. Returns at once and does not wait for the store.
+   * Does nothing if the subscriber does not have track: true.
+   * @param percent - A number from 0 to 100. Values outside the range are clamped.
+   * @param details - Optional small JSON value, for example counters.
+   */
+  progress(percent: number, details?: JsonSerializable): void;
 }
 
 /**
@@ -77,6 +88,12 @@ export interface BaseSubscriberOptions {
 
   /** Feature flag function to conditionally enable/disable the subscriber */
   readonly enabled?: (() => boolean | Promise<boolean>) | undefined;
+
+  /**
+   * If true, Matador keeps a status record for each send to this subscriber.
+   * Requires a statusStore in the Matador config.
+   */
+  readonly track?: boolean | undefined;
 }
 
 /**
@@ -207,6 +224,7 @@ export interface CreateStandardSubscriberInput<T extends MatadorEvent> {
   readonly importance?: Importance | undefined;
   readonly targetQueue?: string | undefined;
   readonly enabled?: (() => boolean | Promise<boolean>) | undefined;
+  readonly track?: boolean | undefined;
 }
 
 /**
@@ -220,6 +238,7 @@ export interface CreateResumableSubscriberInput<T extends MatadorEvent> {
   readonly importance?: Importance | undefined;
   readonly targetQueue?: string | undefined;
   readonly enabled?: (() => boolean | Promise<boolean>) | undefined;
+  readonly track?: boolean | undefined;
 }
 
 /**
@@ -267,6 +286,7 @@ export function createSubscriber<T extends MatadorEvent>(
       targetQueue: input.targetQueue,
     }),
     ...(input.enabled !== undefined && { enabled: input.enabled }),
+    ...(input.track !== undefined && { track: input.track }),
   };
 
   if (input.idempotent === 'resumable') {
@@ -293,6 +313,7 @@ export interface CreateSubscriberStubInput {
   readonly importance?: Importance | undefined;
   readonly targetQueue?: string | undefined;
   readonly enabled?: (() => boolean | Promise<boolean>) | undefined;
+  readonly track?: boolean | undefined;
 }
 
 /**
@@ -318,6 +339,7 @@ export function createSubscriberStub(
       targetQueue: input.targetQueue,
     }),
     ...(input.enabled !== undefined && { enabled: input.enabled }),
+    ...(input.track !== undefined && { track: input.track }),
   };
 }
 
@@ -330,4 +352,5 @@ export interface SubscriberDefinition {
   readonly idempotent: Idempotency;
   readonly importance: Importance;
   readonly targetQueue?: string | undefined;
+  readonly track?: boolean | undefined;
 }

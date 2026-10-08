@@ -132,6 +132,10 @@ export class SchemaRegistry {
       (def as { targetQueue?: string }).targetQueue = subscriber.targetQueue;
     }
 
+    if (subscriber.track !== undefined) {
+      (def as { track?: boolean }).track = subscriber.track;
+    }
+
     return def;
   }
 

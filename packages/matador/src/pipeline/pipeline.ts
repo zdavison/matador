@@ -1,4 +1,8 @@
-import type { Checkpoint, CheckpointStore } from '../checkpoint/index.js';
+import type {
+  Checkpoint,
+  CheckpointStore,
+  JsonSerializable,
+} from '../checkpoint/index.js';
 import { NoOpCheckpointStore, ResumableContext } from '../checkpoint/index.js';
 import type { Codec } from '../codec/index.js';
 import { CodecDecodeError } from '../codec/index.js';
@@ -9,6 +13,11 @@ import {
 import type { SafeHooks } from '../hooks/index.js';
 import type { RetryDecision, RetryPolicy } from '../retry/index.js';
 import type { SchemaRegistry } from '../schema/index.js';
+import {
+  type ProgressReporter,
+  type StatusTracker,
+  isTrackedEnvelope,
+} from '../status/index.js';
 import type { MessageReceipt, Transport } from '../transport/index.js';
 import type {
   CallbackContext,
@@ -32,6 +41,8 @@ export interface PipelineConfig {
   readonly checkpointStore?: CheckpointStore | undefined;
   /** Dispatcher (matador) for sending events from subscriber callbacks */
   readonly dispatcher: Dispatcher;
+  /** Status tracker. Set only if Matador has a statusStore. */
+  readonly statusTracker?: StatusTracker | undefined;
 }
 
 /**
@@ -65,9 +76,11 @@ export class ProcessingPipeline {
   private readonly hooks: SafeHooks;
   private readonly checkpointStore: CheckpointStore;
   private readonly dispatcher: Dispatcher;
+  private readonly statusTracker: StatusTracker | undefined;
 
   constructor(config: PipelineConfig) {
     this.transport = config.transport;
+    this.statusTracker = config.statusTracker;
     this.schema = config.schema;
     this.codec = config.codec;
     this.retryPolicy = config.retryPolicy;
@@ -124,6 +137,7 @@ export class ProcessingPipeline {
 
       // Retry unhandled messages (likely deployment timing issue)
       const decision = this.getUnhandledRetryDecision(envelope, receipt, error);
+      await this.markUnhandledStatus(envelope, error, decision);
       await this.handleRetryDecision(receipt, envelope, decision);
 
       return {
@@ -147,6 +161,7 @@ export class ProcessingPipeline {
 
       // Retry stub messages (likely deployment timing issue)
       const decision = this.getUnhandledRetryDecision(envelope, receipt, error);
+      await this.markUnhandledStatus(envelope, error, decision);
       await this.handleRetryDecision(receipt, envelope, decision);
 
       return {
@@ -209,89 +224,110 @@ export class ProcessingPipeline {
     }
 
     // Create base callback context with matador dispatcher
-    const callbackContext: CallbackContext = { matador: this.dispatcher };
+    // Status tracking: only for envelopes that fanout gave a tracking ID
+    const tracker =
+      this.statusTracker && isTrackedEnvelope(envelope)
+        ? this.statusTracker
+        : undefined;
+    const reporter = tracker?.startProgress(envelope);
+    try {
+      const report = (percent: number, details?: JsonSerializable): void => {
+        reporter?.report(percent, details);
+      };
+      await tracker?.markActive(envelope);
+      const callbackContext: CallbackContext = {
+        matador: this.dispatcher,
+        progress: report,
+      };
 
-    await this.hooks.onWorkerWrap(envelope, subscriberDef, async () => {
-      await this.hooks.onWorkerBeforeProcess(envelope, subscriberDef);
+      await this.hooks.onWorkerWrap(envelope, subscriberDef, async () => {
+        await this.hooks.onWorkerBeforeProcess(envelope, subscriberDef);
 
-      try {
-        if (isResumable && context) {
-          // Resumable subscriber: pass combined context (checkpoint + matador)
-          // Cast needed because TypeScript can't narrow the union type based on isResumable
-          const resumableCallback = subscriber.callback as (
-            envelope: Envelope,
-            context: ResumableCallbackContext,
-          ) => Promise<void> | void;
-          // Create combined context by binding class methods and adding matador
-          const fullContext: ResumableCallbackContext = {
-            io: context.io.bind(context),
-            all: context.all.bind(context),
-            attempt: context.attempt,
-            isRetry: context.isRetry,
-            matador: this.dispatcher,
-          };
-          result = await resumableCallback(envelope, fullContext);
-        } else {
-          // Standard subscriber: pass envelope and callback context
-          const standardCallback = subscriber.callback as (
-            envelope: Envelope,
-            context: CallbackContext,
-          ) => Promise<void> | void;
-          result = await standardCallback(envelope, callbackContext);
+        try {
+          if (isResumable && context) {
+            // Resumable subscriber: pass combined context (checkpoint + matador)
+            // Cast needed because TypeScript can't narrow the union type based on isResumable
+            const resumableCallback = subscriber.callback as (
+              envelope: Envelope,
+              context: ResumableCallbackContext,
+            ) => Promise<void> | void;
+            // Create combined context by binding class methods and adding matador
+            const fullContext: ResumableCallbackContext = {
+              io: context.io.bind(context),
+              all: context.all.bind(context),
+              attempt: context.attempt,
+              isRetry: context.isRetry,
+              matador: this.dispatcher,
+              progress: report,
+            };
+            result = await resumableCallback(envelope, fullContext);
+          } else {
+            // Standard subscriber: pass envelope and callback context
+            const standardCallback = subscriber.callback as (
+              envelope: Envelope,
+              context: CallbackContext,
+            ) => Promise<void> | void;
+            result = await standardCallback(envelope, callbackContext);
+          }
+        } catch (e) {
+          error = e instanceof Error ? e : new Error(String(e));
         }
-      } catch (e) {
-        error = e instanceof Error ? e : new Error(String(e));
-      }
-    });
-
-    const durationMs = performance.now() - startTime;
-
-    // 5. Handle success
-    if (!error) {
-      // Clear checkpoint on success for resumable subscribers
-      if (context) {
-        await context.clear();
-        await this.hooks.onCheckpointCleared?.({
-          envelope,
-          subscriber: subscriberDef,
-          reason: 'success',
-        });
-      }
-
-      await this.transport.complete(receipt);
-      await this.hooks.onWorkerSuccess({
-        envelope,
-        subscriber: subscriberDef,
-        result,
-        durationMs,
-        transport: receipt.sourceTransport,
       });
 
-      return {
-        success: true,
+      const durationMs = performance.now() - startTime;
+
+      // 5. Handle success
+      if (!error) {
+        // Clear checkpoint on success for resumable subscribers
+        if (context) {
+          await context.clear();
+          await this.hooks.onCheckpointCleared?.({
+            envelope,
+            subscriber: subscriberDef,
+            reason: 'success',
+          });
+        }
+
+        await this.transport.complete(receipt);
+        await tracker?.markCompleted(envelope, result, reporter);
+        await this.hooks.onWorkerSuccess({
+          envelope,
+          subscriber: subscriberDef,
+          result,
+          durationMs,
+          transport: receipt.sourceTransport,
+        });
+
+        return {
+          success: true,
+          envelope,
+          subscriber: subscriberDef,
+          durationMs,
+        };
+      }
+
+      // 6. Handle failure - consult retry policy
+      const decision = this.retryPolicy.shouldRetry({
         envelope,
+        error,
         subscriber: subscriberDef,
+        receipt,
+      });
+
+      return await this.handleFailure(
+        error,
+        decision,
+        envelope,
+        subscriberDef,
+        isResumable,
+        receipt,
         durationMs,
-      };
+        reporter,
+      );
+    } finally {
+      // Stop on every exit path, so no late progress write follows a newer status
+      await reporter?.stop();
     }
-
-    // 6. Handle failure - consult retry policy
-    const decision = this.retryPolicy.shouldRetry({
-      envelope,
-      error,
-      subscriber: subscriberDef,
-      receipt,
-    });
-
-    return await this.handleFailure(
-      error,
-      decision,
-      envelope,
-      subscriberDef,
-      isResumable,
-      receipt,
-      durationMs,
-    );
   }
 
   /**
@@ -353,6 +389,7 @@ export class ProcessingPipeline {
    * @param isResumable - Whether the subscriber is resumable
    * @param receipt - The message receipt
    * @param durationMs - The duration of processing
+   * @param reporter - The progress reporter of this delivery, if the envelope is tracked
    * @returns A `ProcessResult` indicating failure
    */
   private async handleFailure(
@@ -363,10 +400,16 @@ export class ProcessingPipeline {
     isResumable: boolean,
     receipt: MessageReceipt,
     durationMs: number,
+    reporter?: ProgressReporter,
   ): Promise<ProcessResult> {
     // Update envelope with error info
     envelope.docket.lastError = error.message;
     envelope.docket.firstError ??= error.message;
+
+    // Write retrying or failed before the retry publishes the next delivery
+    if (this.statusTracker && isTrackedEnvelope(envelope)) {
+      await this.statusTracker.markFailure(envelope, error, decision, reporter);
+    }
 
     // Clear checkpoint on dead-letter (terminal state)
     if (decision.action === 'dead-letter' && isResumable) {
@@ -458,6 +501,20 @@ export class ProcessingPipeline {
    * Gets retry decision for unhandled messages (subscriber not found).
    * Uses same retry policy logic but sends to 'unhandled' DLQ after max attempts.
    */
+  /**
+   * Writes the status of a message that has no executable subscriber.
+   * Runs before the retry publish, as handleFailure does.
+   */
+  private async markUnhandledStatus(
+    envelope: Envelope,
+    error: Error,
+    decision: RetryDecision,
+  ): Promise<void> {
+    if (this.statusTracker && isTrackedEnvelope(envelope)) {
+      await this.statusTracker.markFailure(envelope, error, decision);
+    }
+  }
+
   private getUnhandledRetryDecision(
     envelope: Envelope,
     receipt: MessageReceipt,
