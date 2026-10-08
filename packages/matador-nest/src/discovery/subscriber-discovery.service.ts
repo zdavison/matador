@@ -2,10 +2,11 @@ import { Inject, Injectable, type OnModuleInit } from '@nestjs/common';
 import { DiscoveryService } from '@nestjs/core';
 import {
   type AnySubscriber,
+  type CallbackContext,
   type Envelope,
   type EventClass,
   type MatadorSchema,
-  type SubscriberContext,
+  type ResumableCallbackContext,
   createSubscriber,
 } from '@zdavison/matador';
 import { MATADOR_EVENT_HANDLERS } from '../constants.js';
@@ -95,7 +96,8 @@ export class SubscriberDiscoveryService implements OnModuleInit {
       instance,
     );
 
-    // Create a subscriber that calls the instance method
+    // Create a subscriber that calls the instance method.
+    // The method gets the context, and its return value is the subscriber result.
     const subscriber: AnySubscriber = isResumable
       ? createSubscriber({
           name: subscriberName,
@@ -104,11 +106,12 @@ export class SubscriberDiscoveryService implements OnModuleInit {
           importance: options.importance,
           targetQueue: options.targetQueue,
           enabled: options.enabled,
+          track: options.track,
           callback: async (
             envelope: Envelope<unknown>,
-            context: SubscriberContext,
+            context: ResumableCallbackContext,
           ) => {
-            await boundMethod(envelope, context);
+            return await boundMethod(envelope, context);
           },
         })
       : createSubscriber({
@@ -118,8 +121,12 @@ export class SubscriberDiscoveryService implements OnModuleInit {
           importance: options.importance,
           targetQueue: options.targetQueue,
           enabled: options.enabled,
-          callback: async (envelope: Envelope<unknown>) => {
-            await boundMethod(envelope);
+          track: options.track,
+          callback: async (
+            envelope: Envelope<unknown>,
+            context: CallbackContext,
+          ) => {
+            return await boundMethod(envelope, context);
           },
         });
 

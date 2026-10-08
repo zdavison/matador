@@ -15,6 +15,7 @@ import {
   Matador,
   SchemaRegistry,
   type SendResult,
+  type StatusRecord,
   isSchemaEntryTuple,
 } from '@zdavison/matador';
 import { MATADOR_OPTIONS } from '../constants.js';
@@ -165,6 +166,32 @@ export class MatadorService
   }
 
   /**
+   * Reads the status records of a tracked send.
+   * @returns A map from subscriber name to record, or undefined if no record exists
+   * @throws StatusStoreRequiredError if no statusStore is configured
+   */
+  getStatus(
+    trackingId: string,
+  ): Promise<Readonly<Record<string, StatusRecord>> | undefined>;
+  /**
+   * Reads the status record of one tracked subscriber.
+   */
+  getStatus(
+    trackingId: string,
+    subscriberName: string,
+  ): Promise<StatusRecord | undefined>;
+  async getStatus(
+    trackingId: string,
+    subscriberName?: string,
+  ): Promise<
+    Readonly<Record<string, StatusRecord>> | StatusRecord | undefined
+  > {
+    return subscriberName === undefined
+      ? this.matador.getStatus(trackingId)
+      : this.matador.getStatus(trackingId, subscriberName);
+  }
+
+  /**
    * Gets the underlying Matador instance for advanced operations.
    */
   getMatador(): Matador {
@@ -273,6 +300,7 @@ export class MatadorService
         codec: this.options.codec,
         retryPolicy: this.options.retryPolicy,
         checkpointStore: this.options.checkpointStore,
+        statusStore: this.options.statusStore,
         shutdownConfig: this.options.shutdownConfig,
       },
       this.options.hooks,
