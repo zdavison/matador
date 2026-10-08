@@ -15,6 +15,7 @@ import {
   TopologyBuilder,
   type TrackingStatus,
   createSubscriber,
+  createSubscriberStub,
 } from '../../src/index.js';
 
 class JobEvent extends MatadorEvent {
@@ -278,6 +279,75 @@ describe('status tracking: lifecycle', () => {
     expect(record?.error?.message).toBe(
       'redelivered message for idempotent: no',
     );
+  });
+
+  it('moves a tracked stub subscriber from queued to retrying to failed', async () => {
+    const store = new RecordingStore();
+    const stub = createSubscriberStub({
+      name: 'job-runner',
+      idempotent: 'yes',
+      track: true,
+    });
+    const m = await start({ [JobEvent.key]: [JobEvent, [stub]] }, store, {
+      retry: true,
+    });
+
+    await m.send(JobEvent, { userId: 'u-1' }, { trackingId: 'job-1' });
+    await waitFor(() => store.writes.includes('failed'), 5000);
+
+    expect(store.writes[0]).toBe('queued');
+    expect(store.writes).toContain('retrying');
+    expect(store.writes.at(-1)).toBe('failed');
+    const record = await m.getStatus('job-1', 'job-runner');
+    expect(record?.status).toBe('failed');
+    expect(record?.error?.name).toBe('SubscriberIsStubError');
+  });
+
+  it('moves a tracked message for an unregistered subscriber from queued to failed', async () => {
+    const store = new RecordingStore();
+    const transport = new LocalTransport(silentLogger);
+    const topology = TopologyBuilder.create()
+      .withNamespace('status-int')
+      .addQueue('events')
+      .withRetry({ enabled: true, defaultDelayMs: 1, maxDelayMs: 5 })
+      .build();
+    const subscriber = createSubscriber<JobEvent>({
+      name: 'job-runner',
+      description: 'Runs the job',
+      idempotent: 'yes',
+      track: true,
+      callback: async () => {},
+    });
+    const dispatcher = new Matador(
+      {
+        transport,
+        topology,
+        schema: { [JobEvent.key]: [JobEvent, [subscriber]] },
+        statusStore: store,
+      },
+      { logger: silentLogger },
+    );
+    matador = new Matador(
+      {
+        transport,
+        topology,
+        schema: { [JobEvent.key]: [JobEvent, []] },
+        consumeFrom: ['events'],
+        statusStore: store,
+      },
+      { logger: silentLogger },
+    );
+    await dispatcher.start();
+    await matador.start();
+
+    await dispatcher.send(JobEvent, { userId: 'u-1' }, { trackingId: 'job-1' });
+    await waitFor(() => store.writes.includes('failed'), 5000);
+
+    expect(store.writes).toContain('retrying');
+    const record = await matador.getStatus('job-1', 'job-runner');
+    expect(record?.status).toBe('failed');
+    expect(record?.error?.name).toBe('SubscriberNotRegisteredError');
+    await dispatcher.shutdown();
   });
 
   it('fails with RecordTooLargeError for a large result and does not retry', async () => {

@@ -137,6 +137,10 @@ export class ProcessingPipeline {
 
       // Retry unhandled messages (likely deployment timing issue)
       const decision = this.getUnhandledRetryDecision(envelope, receipt, error);
+      // Write the status before the retry publish, as handleFailure does.
+      if (this.statusTracker && isTrackedEnvelope(envelope)) {
+        await this.statusTracker.markFailure(envelope, error, decision);
+      }
       await this.handleRetryDecision(receipt, envelope, decision);
 
       return {
@@ -160,6 +164,10 @@ export class ProcessingPipeline {
 
       // Retry stub messages (likely deployment timing issue)
       const decision = this.getUnhandledRetryDecision(envelope, receipt, error);
+      // Write the status before the retry publish, as handleFailure does.
+      if (this.statusTracker && isTrackedEnvelope(envelope)) {
+        await this.statusTracker.markFailure(envelope, error, decision);
+      }
       await this.handleRetryDecision(receipt, envelope, decision);
 
       return {
