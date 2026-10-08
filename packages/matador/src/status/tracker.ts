@@ -71,7 +71,8 @@ function toRecordError(error: Error): StatusRecordError {
 function boundedEnvelope(envelope: Envelope): Envelope {
   const { firstError, lastError } = envelope.docket;
   if (
-    (firstError === undefined || firstError.length <= MAX_RECORD_ERROR_LENGTH) &&
+    (firstError === undefined ||
+      firstError.length <= MAX_RECORD_ERROR_LENGTH) &&
     (lastError === undefined || lastError.length <= MAX_RECORD_ERROR_LENGTH)
   ) {
     return envelope;

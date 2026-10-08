@@ -394,10 +394,10 @@ export class Matador implements Dispatcher {
     const result = await this.fanout.send(eventClass, event, options);
     if (result.errors.length > 0)
       throw new SomeSendError(
-          result.eventKey,
-          result.errors,
-          result.trackingId,
-        );
+        result.eventKey,
+        result.errors,
+        result.trackingId,
+      );
     return result;
   }
 

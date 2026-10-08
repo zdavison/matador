@@ -137,10 +137,7 @@ export class ProcessingPipeline {
 
       // Retry unhandled messages (likely deployment timing issue)
       const decision = this.getUnhandledRetryDecision(envelope, receipt, error);
-      // Write the status before the retry publish, as handleFailure does.
-      if (this.statusTracker && isTrackedEnvelope(envelope)) {
-        await this.statusTracker.markFailure(envelope, error, decision);
-      }
+      await this.markUnhandledStatus(envelope, error, decision);
       await this.handleRetryDecision(receipt, envelope, decision);
 
       return {
@@ -164,10 +161,7 @@ export class ProcessingPipeline {
 
       // Retry stub messages (likely deployment timing issue)
       const decision = this.getUnhandledRetryDecision(envelope, receipt, error);
-      // Write the status before the retry publish, as handleFailure does.
-      if (this.statusTracker && isTrackedEnvelope(envelope)) {
-        await this.statusTracker.markFailure(envelope, error, decision);
-      }
+      await this.markUnhandledStatus(envelope, error, decision);
       await this.handleRetryDecision(receipt, envelope, decision);
 
       return {
@@ -507,6 +501,20 @@ export class ProcessingPipeline {
    * Gets retry decision for unhandled messages (subscriber not found).
    * Uses same retry policy logic but sends to 'unhandled' DLQ after max attempts.
    */
+  /**
+   * Writes the status of a message that has no executable subscriber.
+   * Runs before the retry publish, as handleFailure does.
+   */
+  private async markUnhandledStatus(
+    envelope: Envelope,
+    error: Error,
+    decision: RetryDecision,
+  ): Promise<void> {
+    if (this.statusTracker && isTrackedEnvelope(envelope)) {
+      await this.statusTracker.markFailure(envelope, error, decision);
+    }
+  }
+
   private getUnhandledRetryDecision(
     envelope: Envelope,
     receipt: MessageReceipt,
