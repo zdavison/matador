@@ -152,27 +152,34 @@ class Matador {
 type TrackingStatus = 'queued' | 'active' | 'retrying' | 'completed' | 'failed';
 
 interface StatusRecord {
-  readonly trackingId: string;
-  readonly subscriberName: string;
   readonly status: TrackingStatus;
-  /** The attempt number of the latest delivery (1-based). */
-  readonly attempts: number;
   readonly progress?: {
     readonly percent: number;
     readonly details?: JsonSerializable | undefined;
   } | undefined;
   /** Set only when status is 'completed'. */
   readonly result?: JsonSerializable | undefined;
-  /** Set when status is 'retrying' or 'failed'. */
+  /** Set when status is 'retrying' or 'failed'. Covers errors that are not in the docket. */
   readonly error?: { readonly name: string; readonly message: string } | undefined;
-  /** The latest envelope, including data and docket. */
+  /** The latest envelope. Holds the trackingId, the subscriber, createdAt and attempts. */
   readonly envelope: Envelope;
-  readonly createdAt: string; // ISO 8601
   readonly updatedAt: string; // ISO 8601
 }
 ```
 
-- Matador writes the whole record on each status change. The record always has the latest envelope, so `docket.attempts`, `firstError` and `lastError` are current.
+- The record does not copy values that the envelope holds. Apps read these values from the envelope:
+
+  | Value | Envelope field |
+  |---|---|
+  | Tracking ID | `docket.trackingId` |
+  | Subscriber name | `docket.targetSubscriber` |
+  | Creation time | `docket.createdAt` |
+  | Attempt count | `docket.attempts` |
+  | Callback error messages | `docket.firstError`, `docket.lastError` |
+
+- Matador writes the whole record on each status change. The record always has the latest envelope, so the docket fields are current.
+- `docket.attempts` counts Matador retries. A transport can report a different attempt number, for example after a crash and a redelivery. v1 does not store the transport value.
+- `error` exists because the docket does not hold all failure causes. `RecordTooLargeError`, `ResultNotSerializableError` and a publish failure are not in the docket. The docket also has no error `name`.
 - `error` has no stack trace. This keeps the record small.
 
 ### 5.1 Size limit
@@ -242,7 +249,7 @@ interface StatusStore {
   getAll(trackingId: string): Promise<Readonly<Record<string, StatusRecord>> | undefined>;
   get(trackingId: string, subscriberName: string): Promise<StatusRecord | undefined>;
   /** Writes the record. Replaces any record with the same trackingId and subscriber name. */
-  set(record: StatusRecord): Promise<void>;
+  set(trackingId: string, subscriberName: string, record: StatusRecord): Promise<void>;
   /** Deletes all records for one trackingId. */
   delete(trackingId: string): Promise<void>;
   /** Optional: deletes records with updatedAt before olderThan. Returns the count. */
