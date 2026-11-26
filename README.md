@@ -232,6 +232,21 @@ await matador.start();
 await matador.send(UserLoggedInEvent, { userId: '123', username: 'john' });
 ```
 
+Use `sendMany` to keep multiple events in flight while getting one result per
+event in input order:
+
+```ts
+const results = await matador.sendMany([
+  new UserLoggedInEvent({ userId: '123', username: 'john' }),
+  new UserLoggedInEvent({ userId: '456', username: 'jane' }),
+], { buffer: false });
+```
+
+`sendMany` processes up to 32 events at once per call. Each result is fulfilled
+with the same `SendResult` as `send`, or rejected with that event's error. Fanout
+can partially succeed within an event. Set `buffer: false` when your application
+manages retries and needs failures returned without an in-memory retry.
+
 # Concepts
 
 ### `MatadorEvent`

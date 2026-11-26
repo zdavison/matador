@@ -1,16 +1,9 @@
-import type {
-  Channel,
-  ChannelModel,
-  ConfirmChannel,
-  ConsumeMessage,
-  Options,
-} from 'amqplib';
+import type { Channel, ChannelModel, ConsumeMessage, Options } from 'amqplib';
 import amqplib from 'amqplib';
 import { RabbitMQCodec } from '../../codec/rabbitmq-codec.js';
 import {
   DelayedMessagesNotSupportedError,
   TransportNotConnectedError,
-  TransportSendError,
 } from '../../errors/index.js';
 import { type Logger, consoleLogger } from '../../hooks/index.js';
 import type { QueueDefinition, Topology } from '../../topology/types.js';
@@ -34,6 +27,7 @@ import type {
   Subscription,
   Transport,
 } from '../transport.js';
+import { RabbitMQPublisher } from './rabbitmq-publisher.js';
 
 /**
  * Configuration options for the RabbitMQ transport.
@@ -58,12 +52,11 @@ export interface RabbitMQTransportConfig {
   readonly enableDelayedMessages?: boolean | undefined;
 
   /**
-   * How long to wait for the broker to confirm a publish before failing,
+   * How long to wait for a publish to drain and be confirmed by the broker,
    * in milliseconds (default: 5000).
    *
    * Publishes use a confirm channel: `send()` resolves only once the broker
-   * acks the message, and rejects on nack or timeout, so callers can await
-   * delivery confirmation rather than treating publishes as fire-and-forget.
+   * acks the message, and rejects on return, nack, channel loss, or timeout.
    */
   readonly publishTimeoutMs?: number | undefined;
 
@@ -135,7 +128,7 @@ export class RabbitMQTransport implements Transport {
   }
 
   private connection: ChannelModel | null = null;
-  private publishChannel: ConfirmChannel | null = null;
+  private publisher: RabbitMQPublisher | null = null;
   private readonly connectionManager: ConnectionManager;
   private readonly queueChannels = new Map<string, QueueChannel>();
   private readonly subscriptionIntents: SubscriptionIntent[] = [];
@@ -143,9 +136,10 @@ export class RabbitMQTransport implements Transport {
   private readonly codec = new RabbitMQCodec();
 
   private readonly config: Required<
-    Omit<RabbitMQTransportConfig, 'connection' | 'logger'>
+    Omit<RabbitMQTransportConfig, 'connection' | 'logger' | 'publishTimeoutMs'>
   > & {
     readonly connection: Partial<ConnectionManagerConfig>;
+    readonly publishTimeoutMs: number;
   };
 
   private readonly logger: Logger;
@@ -198,11 +192,11 @@ export class RabbitMQTransport implements Transport {
   async applyTopology(topology: Topology): Promise<void> {
     this.topology = topology;
 
-    if (!this.publishChannel) {
+    if (!this.publisher) {
       throw new TransportNotConnectedError(this.name, 'applyTopology');
     }
 
-    const channel = this.publishChannel;
+    const channel = this.publisher.channel;
 
     // Create the main exchange for routing messages to queues
     const mainExchange = this.getMainExchangeName(topology);
@@ -246,7 +240,7 @@ export class RabbitMQTransport implements Transport {
     envelope: Envelope,
     options?: SendOptions,
   ): Promise<Transport['name']> {
-    if (!this.publishChannel || !this.topology) {
+    if (!this.publisher || !this.topology) {
       throw new TransportNotConnectedError(this.name, 'send');
     }
 
@@ -276,8 +270,8 @@ export class RabbitMQTransport implements Transport {
         ...publishOptions.headers,
         'x-delay': options.delay,
       };
-      await this.confirmPublish(
-        this.publishChannel,
+      // The delayed exchange plugin does not support mandatory routing.
+      await this.publisher.publish(
         delayedExchange,
         queue,
         buffer,
@@ -298,13 +292,10 @@ export class RabbitMQTransport implements Transport {
     const routingKey = options?.transport?.rabbitmq?.routingKey ?? queue;
     const exchange = this.getMainExchangeName(this.topology);
 
-    await this.confirmPublish(
-      this.publishChannel,
-      exchange,
-      routingKey,
-      buffer,
-      publishOptions,
-    );
+    await this.publisher.publish(exchange, routingKey, buffer, {
+      ...publishOptions,
+      mandatory: true,
+    });
     return this.name;
   }
 
@@ -444,7 +435,7 @@ export class RabbitMQTransport implements Transport {
     envelope: Envelope,
     reason: string,
   ): Promise<void> {
-    if (!this.publishChannel || !this.topology) {
+    if (!this.publisher || !this.topology) {
       throw new TransportNotConnectedError(this.name, 'sendToDeadLetter');
     }
 
@@ -475,8 +466,7 @@ export class RabbitMQTransport implements Transport {
       },
     };
 
-    await this.confirmPublish(
-      this.publishChannel,
+    await this.publisher.publish(
       dlxExchange,
       dlqQueueName,
       buffer,
@@ -485,50 +475,6 @@ export class RabbitMQTransport implements Transport {
 
     // Complete the original message
     await this.complete(receipt);
-  }
-
-  /**
-   * Publishes on the confirm channel and resolves once the broker
-   * acknowledges the message, rejecting on broker nack, channel error, or
-   * after `publishTimeoutMs` elapses without a confirm.
-   *
-   * Mirrors Matador v1's promise-wrapped amqplib publish callback to give
-   * callers confirmed (at-least-once) delivery semantics.
-   */
-  private confirmPublish(
-    channel: ConfirmChannel,
-    exchange: string,
-    routingKey: string,
-    buffer: Buffer,
-    options: Options.Publish,
-  ): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      let timeout: NodeJS.Timeout | null = setTimeout(() => {
-        timeout = null;
-        reject(
-          new TransportSendError(
-            routingKey,
-            new Error(
-              `Publish not confirmed by broker within ${this.config.publishTimeoutMs}ms`,
-            ),
-          ),
-        );
-      }, this.config.publishTimeoutMs);
-
-      channel.publish(exchange, routingKey, buffer, options, (err) => {
-        if (timeout) {
-          clearTimeout(timeout);
-        } else {
-          // Already timed out and rejected; nothing left to settle.
-          return;
-        }
-        if (err) {
-          reject(new TransportSendError(routingKey, err));
-        } else {
-          resolve();
-        }
-      });
-    });
   }
 
   // Private methods
@@ -585,7 +531,7 @@ export class RabbitMQTransport implements Transport {
         // Can happen if the connection is already closed
       }
       this.connection = null;
-      this.publishChannel = null; // channels belong to the old connection
+      this.publisher = null; // channels belong to the old connection
     }
 
     // Drop stale channel objects so getOrCreateQueueChannel opens fresh ones
@@ -606,6 +552,9 @@ export class RabbitMQTransport implements Transport {
     });
 
     connection.on('close', () => {
+      if (this.connection !== connection) return;
+      const error = new Error('RabbitMQ connection closed');
+      this.publisher?.fail(error);
       // Immediately deactivate all live consumers so any buffered messages
       // delivered on the dying connection are dropped rather than partially
       // processed (handler fires but ack silently fails on the dead channel).
@@ -615,22 +564,27 @@ export class RabbitMQTransport implements Transport {
         }
       }
       this.connection = null;
-      this.publishChannel = null;
+      this.publisher = null;
 
       if (this.connectionManager.isConnected()) {
         // Unexpected close, trigger reconnection
-        this.connectionManager.handleConnectionLost(
-          new Error('Connection closed unexpectedly'),
-        );
+        this.connectionManager.handleConnectionLost(error);
       }
     });
 
     try {
       // A confirm channel so publishes can await broker acknowledgement
-      this.publishChannel = await connection.createConfirmChannel();
+      const channel = await connection.createConfirmChannel();
+      if (this.connection !== connection) {
+        throw new TransportNotConnectedError(this.name, 'connect');
+      }
+      this.publisher = new RabbitMQPublisher(
+        channel,
+        this.config.publishTimeoutMs,
+      );
 
       // Handle publish channel errors to prevent unhandled error events
-      this.publishChannel.on('error', (err: Error) => {
+      channel.on('error', (err: Error) => {
         this.logger.error('[Matador] 🔴 RabbitMQ publish channel error', err);
       });
 
@@ -650,7 +604,7 @@ export class RabbitMQTransport implements Transport {
         // Ignore errors during cleanup
       }
       this.connection = null;
-      this.publishChannel = null;
+      this.publisher = null;
       throw err;
     }
 
@@ -677,13 +631,14 @@ export class RabbitMQTransport implements Transport {
     this.queueChannels.clear();
 
     // Close publish channel
-    if (this.publishChannel) {
+    if (this.publisher) {
       try {
-        await this.publishChannel.close();
+        this.publisher.fail(new Error('RabbitMQ transport disconnected'));
+        await this.publisher.channel.close();
       } catch {
         // Ignore
       }
-      this.publishChannel = null;
+      this.publisher = null;
     }
 
     // Close connection

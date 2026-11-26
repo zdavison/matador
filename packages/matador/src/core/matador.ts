@@ -32,6 +32,8 @@ import { FanoutEngine } from './fanout.js';
 import type { HandlersState, ShutdownConfig } from './shutdown.js';
 import { ShutdownManager } from './shutdown.js';
 
+const SEND_MANY_CONCURRENCY = 32;
+
 /**
  * Configuration for Matador.
  */
@@ -352,6 +354,39 @@ export class Matador implements Dispatcher {
     if (result.errors.length > 0)
       throw new SomeSendError(result.eventKey, result.errors);
     return result;
+  }
+
+  /**
+   * Sends events with up to 32 events in flight per call. Each uses the same
+   * fanout, buffering, and error behavior as send(). Results match input
+   * order, even when the broker confirms publishes out of order.
+   */
+  async sendMany(
+    events: readonly Event[],
+    options?: EventOptions,
+  ): Promise<PromiseSettledResult<SendResult>[]> {
+    const results: PromiseSettledResult<SendResult>[] = new Array(
+      events.length,
+    );
+    const entries = events.entries();
+    await Promise.all(
+      Array.from(
+        { length: Math.min(events.length, SEND_MANY_CONCURRENCY) },
+        async () => {
+          for (const [index, event] of entries) {
+            try {
+              results[index] = {
+                status: 'fulfilled',
+                value: await this.send(event, options),
+              };
+            } catch (reason) {
+              results[index] = { status: 'rejected', reason };
+            }
+          }
+        },
+      ),
+    );
+    return results;
   }
 
   /**

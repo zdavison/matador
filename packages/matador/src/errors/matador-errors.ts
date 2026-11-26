@@ -152,7 +152,7 @@ export class TransportSendError extends MatadorError {
     '(1) Transport disconnected during send, ' +
     '(2) Network issues between application and broker, ' +
     '(3) Broker rejected the message (size, permissions, queue limits). ' +
-    'The message was NOT delivered and should be retried or logged.';
+    'Delivery was not confirmed. A retry can duplicate a message accepted before a timeout or disconnect.';
 
   constructor(
     public readonly queue: string,
