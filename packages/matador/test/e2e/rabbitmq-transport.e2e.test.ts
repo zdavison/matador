@@ -17,8 +17,11 @@ import {
   Matador,
   MatadorEvent,
   type MatadorSchema,
+  SomeSendError,
+  TopologyBuilder,
   createEnvelope,
   createSubscriber,
+  resolveTargetQueueName,
 } from '../../src/index.js';
 import { StandardRetryPolicy } from '../../src/retry/index.js';
 import type { QueueDefinition, Topology } from '../../src/topology/types.js';
@@ -51,6 +54,101 @@ describe.skipIf(SKIP_E2E)('RabbitMQ Transport E2E', () => {
       await container.stop();
     }
   });
+
+  it('confirms durable batch publishes and rejects only unroutable events', async () => {
+    class RoutedEvent extends MatadorEvent<{ id: string }> {
+      static readonly key = 'batch.routed';
+      constructor(readonly data: { id: string }) {
+        super();
+      }
+    }
+
+    class UnroutableEvent extends MatadorEvent<{ id: string }> {
+      static readonly key = 'batch.unroutable';
+      constructor(readonly data: { id: string }) {
+        super();
+      }
+    }
+
+    const namespace = `batch-${Date.now()}`;
+    const topology = TopologyBuilder.create()
+      .withNamespace(namespace)
+      .addQueue('events')
+      .addQueue('removed')
+      .build();
+    const transport = new RabbitMQTransport({
+      url: connectionUrl,
+      connectionName: 'batch-confirm',
+      enableDelayedMessages: false,
+    });
+    const routed = createSubscriber<RoutedEvent>({
+      name: 'routed',
+      description: 'Handles a routed message',
+      targetQueue: 'events',
+      callback: async () => {},
+    });
+    const unroutable = createSubscriber<UnroutableEvent>({
+      name: 'unroutable',
+      description: 'Targets a queue removed after topology setup',
+      targetQueue: 'removed',
+      callback: async () => {},
+    });
+    const matador = new Matador({
+      transport,
+      topology,
+      schema: {
+        [RoutedEvent.key]: [RoutedEvent, [routed]],
+        [UnroutableEvent.key]: [UnroutableEvent, [unroutable]],
+      },
+    });
+    const observer = await amqplib.connect(connectionUrl);
+    try {
+      await matador.start();
+      const channel = await observer.createChannel();
+      await channel.deleteQueue(resolveTargetQueueName(topology, 'removed'));
+
+      const results = await matador.sendMany(
+        [
+          new RoutedEvent({ id: 'one' }),
+          new UnroutableEvent({ id: 'two' }),
+          new RoutedEvent({ id: 'three' }),
+        ],
+        { buffer: false },
+      );
+      expect(results.map((result) => result.status)).toEqual([
+        'fulfilled',
+        'rejected',
+        'fulfilled',
+      ]);
+      expect(results[1]).toMatchObject({
+        status: 'rejected',
+        reason: expect.any(SomeSendError),
+      });
+
+      await matador.shutdown();
+      const queue = resolveTargetQueueName(topology, 'events');
+      const deliveries = await Promise.all([
+        channel.get(queue, { noAck: true }),
+        channel.get(queue, { noAck: true }),
+      ]);
+      expect(
+        deliveries.map((message) =>
+          message ? message.properties.deliveryMode : undefined,
+        ),
+      ).toEqual([2, 2]);
+      expect(
+        deliveries
+          .map(
+            (message) =>
+              message && JSON.parse(message.content.toString()).data.id,
+          )
+          .sort(),
+      ).toEqual(['one', 'three']);
+    } finally {
+      await matador.shutdown();
+      await observer.close();
+    }
+  }, 15_000);
 
   describe('RabbitMQ-specific features', () => {
     let transport: RabbitMQTransport;

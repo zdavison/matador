@@ -243,6 +243,58 @@ describe('Matador', () => {
     });
   });
 
+  describe('sendMany', () => {
+    it('keeps a bounded number of events in flight and refills the window', async () => {
+      const topology = TopologyBuilder.create()
+        .withNamespace('test')
+        .addQueue('events')
+        .build();
+      const subscriber = createSubscriber({
+        name: 'handle-user',
+        description: 'Handles user events',
+        callback: async () => {},
+      });
+      const pending: Array<() => void> = [];
+      transport.send = mock(
+        () =>
+          new Promise<string>((resolve) => {
+            pending.push(() => resolve(transport.name));
+          }),
+      );
+      matador = new Matador({
+        transport,
+        topology,
+        schema: { [UserCreatedEvent.key]: [UserCreatedEvent, [subscriber]] },
+      });
+      await matador.start();
+
+      const events = Array.from(
+        { length: 33 },
+        (_, userId) =>
+          new UserCreatedEvent({
+            userId: String(userId),
+            email: 'test@example.com',
+          }),
+      );
+      const results = matador.sendMany(events);
+      await Bun.sleep(0);
+      expect(transport.send).toHaveBeenCalledTimes(32);
+
+      pending.shift()?.();
+      await Bun.sleep(0);
+      expect(transport.send).toHaveBeenCalledTimes(33);
+      for (const confirm of pending) confirm();
+
+      expect(
+        (await results).every(
+          (result) =>
+            result.status === 'fulfilled' && result.value.subscribersSent === 1,
+        ),
+      ).toBe(true);
+      await expect(matador.sendMany([])).resolves.toEqual([]);
+    });
+  });
+
   describe('send', () => {
     it('should throw if not started', async () => {
       const topology = TopologyBuilder.create()
